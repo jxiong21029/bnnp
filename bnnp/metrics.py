@@ -12,7 +12,7 @@ def rms(x, dim=-1):
 
 
 class Metrics:
-    def __init__(self, enabled: bool, use_wandb: bool):
+    def __init__(self, enabled: bool, use_wandb: bool = False):
         self.enabled = enabled
         self.use_wandb = use_wandb
 
