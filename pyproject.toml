@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bnnp"
+version = "0.1"
+
+[tool.ruff]
+line-length = 88
+exclude = ["data", "runs"]
+
+[tool.setuptools]
+packages = ["bnnp"]
