@@ -1,5 +1,6 @@
 from .architectures import Conv1d, Conv2d, Conv3d
 from .components import FusedLinear, RMSNorm
+from .configuration import parse_config
 from .metrics import Metrics, rms
 from .muon import Muon, auto_split_muon_params
 
@@ -14,5 +15,6 @@ __all__ = [
     "Muon",
     "Output",
     "auto_split_muon_params",
+    "parse_config",
     "rms",
 ]
