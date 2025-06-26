@@ -11,28 +11,34 @@ ortho_dtype = (
 
 log = logging.getLogger(__name__)
 
+# See: https://arxiv.org/abs/2505.16932
+COEFFS = [
+    (8.28721201814563, -23.595886519098837, 17.300387312530933),
+    (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
+    (3.9486908534822946, -2.908902115962949, 0.5518191394370137),
+    (3.3184196573706015, -2.488488024314874, 0.51004894012372),
+    (2.300652019954817, -1.6689039845747493, 0.4188073119525673),
+    (1.891301407787398, -1.2679958271945868, 0.37680408948524835),
+    (1.8750014808534479, -1.2500016453999487, 0.3750001645474248),
+    (1.875, -1.25, 0.375),
+]
+COEFFS = [(a / 1.01, b / 1.01**3, c / 1.01**5) for a, b, c in COEFFS[:-1]] + COEFFS[-1:]
 
-def orthogonalize(G):
-    """Computes the semi-orthogonalization of G with Newton-Schulz iteration."""
+
+def orthogonalize(G: torch.Tensor, steps: int) -> torch.Tensor:
+    """Computes the semi-orthogonalization of G."""
     assert G.ndim >= 2
     X = G.type(ortho_dtype)
     if G.size(-2) > G.size(-1):
         X = X.mT
 
     # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01)
 
-    # Coefficients from https://leloykun.github.io/ponder/muon-opt-coeffs/
-    A = X @ X.mT
-    X = 4.0848 * X + (-6.8946 * A + 2.9270 * A @ A) @ X
-    A = X @ X.mT
-    X = 3.9505 * X + (-6.3029 * A + 2.6377 * A @ A) @ X
-    A = X @ X.mT
-    X = 3.7418 * X + (-5.5913 * A + 2.3037 * A @ A) @ X
-    A = X @ X.mT
-    X = 2.8769 * X + (-3.1427 * A + 1.2046 * A @ A) @ X
-    A = X @ X.mT
-    X = 2.8366 * X + (-3.0525 * A + 1.2012 * A @ A) @ X
+    for step in range(steps):
+        a, b, c = COEFFS[min(step, len(COEFFS) - 1)]
+        A = X @ X.mT
+        X = a * X + (b * A + c * A @ A) @ X
 
     if G.size(-2) > G.size(-1):
         # Scale to ensure that the norm of the ROWS of G (i.e. change in output) is 1
@@ -57,9 +63,14 @@ class Muon(torch.optim.Optimizer):
         momentum: float = 0.9,
         weight_decay: float = 0.01,
         nesterov: bool = True,
+        ns_steps: int = 5,
     ):
         defaults = dict(
-            lr=lr, momentum=momentum, weight_decay=weight_decay, nesterov=nesterov
+            lr=lr,
+            momentum=momentum,
+            weight_decay=weight_decay,
+            nesterov=nesterov,
+            ns_steps=ns_steps,
         )
         super().__init__(params, defaults)
 
@@ -70,6 +81,7 @@ class Muon(torch.optim.Optimizer):
             weight_decay = group["weight_decay"]
             momentum = group["momentum"]
             nesterov = group["nesterov"]
+            ns_steps = group["ns_steps"]
 
             for param in group["params"]:
                 g = param.grad
@@ -82,7 +94,7 @@ class Muon(torch.optim.Optimizer):
                 buf = state["momentum_buffer"]
                 buf.lerp_(g, 1 - momentum)
                 g = g.lerp_(buf, momentum) if nesterov else buf
-                g = orthogonalize(g).add_(param, alpha=weight_decay)
+                g = orthogonalize(g, steps=ns_steps).add_(param, alpha=weight_decay)
                 param.sub_(g, alpha=lr)
 
 
