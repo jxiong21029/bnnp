@@ -33,7 +33,7 @@ def orthogonalize(G: torch.Tensor, steps: int) -> torch.Tensor:
         X = X.mT
 
     # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01)
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + 1e-7)
 
     for step in range(steps):
         a, b, c = COEFFS[min(step, len(COEFFS) - 1)]
@@ -43,6 +43,7 @@ def orthogonalize(G: torch.Tensor, steps: int) -> torch.Tensor:
     if G.size(-2) > G.size(-1):
         # Scale to ensure that the norm of the ROWS of G (i.e. change in output) is 1
         X = X.mT * (G.size(-2) / G.size(-1)) ** 0.5
+
     return X.type_as(G)
 
 

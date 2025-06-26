@@ -79,9 +79,9 @@ class Embedding(nn.Embedding):
 class Output(nn.Module):
     def __init__(self, dim: int, out_dim: int, pad_to: int | None = None):
         super().__init__()
-        self.pad_to = pad_to if pad_to is not None else out_dim
-        self.out_dim = out_dim
+        pad_to = pad_to if pad_to is not None else out_dim
         padded_out_dim = (out_dim + pad_to - 1) // pad_to * pad_to
+        self.out_dim = out_dim
 
         self.norm = RMSNorm(dim)
         self.linear = FusedLinear(dim, padded_out_dim, zero_init=True)
