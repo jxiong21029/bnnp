@@ -7,7 +7,7 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
-from bnnp.components import FusedLinear, RMSNorm
+from bnnp.nn import FusedLinear, RMSNorm
 
 
 class ReLU2(nn.Module):

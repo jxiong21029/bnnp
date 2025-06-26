@@ -1,6 +1,6 @@
 import torch
 
-from bnnp.architectures.convolution import Conv2d, Conv3d
+from bnnp.nn import Conv2d, Conv3d
 
 
 def test_conv2d():
