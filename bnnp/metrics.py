@@ -72,7 +72,6 @@ class Metrics:
         if not self.enabled:
             return
 
-        self.tick(None)
         if self.use_cuda_events and len(self.timed_events) > 0:
             torch.cuda.synchronize()
         for k, start, end in self.timed_events:

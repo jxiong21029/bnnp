@@ -5,6 +5,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class ReLU2(nn.Module):
+    def forward(self, x: torch.Tensor):
+        return F.relu(x).square()
+
+
+class MLPBlock(nn.Module):
+    def __init__(self, dim: int, mlp_dim: int, activation=ReLU2):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            RMSNorm(dim, affine=False),
+            FusedLinear(dim, mlp_dim),
+            activation(),
+            FusedLinear(mlp_dim, dim, zero_init=True, scale=True),
+        )
+
+    def forward(self, x):
+        return x + self.mlp(x)
+
+
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, affine=False):
         super().__init__()
