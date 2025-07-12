@@ -7,6 +7,7 @@ import torch
 log = logging.getLogger(__name__)
 
 
+# Provided for convenience due to often being used for logged metrics.
 @torch.no_grad()
 def rms(x, dim=-1):
     return x.float().pow(2).mean(dim=dim).sqrt().mean()
@@ -90,6 +91,7 @@ class Metrics:
         if not self.enabled:
             return
 
+        self.tick(None)
         self.tock()
         results = {}
         for k in self.n:

@@ -18,7 +18,9 @@ def test_timing_cpu():
     assert isinstance(W.grad, torch.Tensor)
     assert W.grad.std() > 0.0
 
+    metrics.tick(None)
     metrics.tock()
+
     assert "forward_sec" in metrics.n
     assert "forward_sec" in metrics.mean
     assert "backward_sec" in metrics.n
@@ -33,9 +35,9 @@ def test_timing_cpu():
 def test_timing_cuda_event():
     metrics = Metrics(enabled=True, use_wandb=False, use_cuda_events=True)
     metrics.tick("forward")
-    W = torch.randn(32, 16, device=0)
+    W = torch.randn(32, 16, device="cuda")
     W.requires_grad_(True)
-    x = torch.randn(16, device=0) @ W.t()
+    x = torch.randn(16, device="cuda") @ W.t()
     loss = x.mean()
 
     metrics.tick("backward")
@@ -44,7 +46,9 @@ def test_timing_cuda_event():
     assert isinstance(W.grad, torch.Tensor)
     assert W.grad.std() > 0.0
 
+    metrics.tick(None)
     metrics.tock()
+
     assert "forward_sec" in metrics.n
     assert "forward_sec" in metrics.mean
     assert "backward_sec" in metrics.n
@@ -52,4 +56,3 @@ def test_timing_cuda_event():
     assert metrics.mean["forward_sec"] > 0.0
     assert metrics.mean["backward_sec"] > 0.0
     assert len(metrics.timed_events) == 0
-    metrics.report()
