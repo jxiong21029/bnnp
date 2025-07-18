@@ -60,13 +60,15 @@ class Metrics:
             if len(self.timed_events) >= 1024:
                 self.tock()
 
-        self.curr_event = name
         if name is not None:
+            self.curr_event = self.context + name
             if self.use_cuda_events:
                 self.last_t = torch.cuda.Event(enable_timing=True)
                 self.last_t.record()
             else:
                 self.last_t = time.perf_counter()
+        else:
+            self.curr_event = None
 
     def tock(self):
         """Synchronize CPU-GPU and push timed interval lengths."""
@@ -80,10 +82,10 @@ class Metrics:
                 elapsed = start.elapsed_time(end) / 1000.0
             else:
                 elapsed = end - start
-            ck = self.context + str(k) + "_sec"
-            delta = elapsed - self.mean[ck]
-            self.n[ck] += 1
-            self.mean[ck] += delta / self.n[ck]
+            k = str(k) + "_sec"
+            delta = elapsed - self.mean[k]
+            self.n[k] += 1
+            self.mean[k] += delta / self.n[k]
         self.timed_events.clear()
 
     def report(self):
