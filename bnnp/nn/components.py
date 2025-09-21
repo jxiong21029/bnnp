@@ -5,6 +5,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def mpparam(*size, gain=0.5):
+    """Initialize a weight which maps RMS norm 1 inputs to RMS norm `gain` inputs."""
+    return nn.Parameter(torch.randn(*size) / math.sqrt(size[-1]) * gain)
+
+
 class ReLU2(nn.Module):
     def forward(self, x: torch.Tensor):
         return F.relu(x).square()
@@ -54,9 +59,7 @@ class FusedLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
 
-        self.weight = nn.Parameter(
-            torch.randn(out_features, in_features) / math.sqrt(in_features) * gain
-        )
+        self.weight = mpparam(out_features, in_features, gain=gain)
 
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_features))
