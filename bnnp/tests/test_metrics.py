@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from bnnp import Metrics, MetricsV2
+from bnnp import Metrics
 
 
 def test_timing_cpu():
@@ -19,7 +19,7 @@ def test_timing_cpu():
     assert W.grad.std() > 0.0
 
     metrics.tick(None)
-    metrics.tock()
+    metrics.push_ticks()
 
     assert "forward_sec" in metrics.n
     assert "forward_sec" in metrics.mean
@@ -28,7 +28,7 @@ def test_timing_cpu():
     assert metrics.mean["forward_sec"] > 0.0
     assert metrics.mean["backward_sec"] > 0.0
     assert len(metrics.timed_events) == 0
-    metrics.report()
+    metrics.commit()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda_unavailable")
@@ -47,7 +47,7 @@ def test_timing_cuda_event():
     assert W.grad.std() > 0.0
 
     metrics.tick(None)
-    metrics.tock()
+    metrics.push_ticks()
 
     assert "forward_sec" in metrics.n
     assert "forward_sec" in metrics.mean
@@ -56,24 +56,4 @@ def test_timing_cuda_event():
     assert metrics.mean["forward_sec"] > 0.0
     assert metrics.mean["backward_sec"] > 0.0
     assert len(metrics.timed_events) == 0
-
-
-def test_metricsv2(caplog):
-    metrics = MetricsV2(use_wandb=False)
-    metrics.tick("forward")
-    W = torch.randn(32, 16)
-    W.requires_grad_(True)
-    x = torch.randn(16) @ W.t()
-    loss = x.mean()
-
-    metrics.tick("backward")
-    loss.backward()
-    assert hasattr(W, "grad")
-    assert isinstance(W.grad, torch.Tensor)
-    assert W.grad.std() > 0.0
-
-    with caplog.at_level("INFO"):
-        metrics.log(train_loss=loss)
-    assert "forward_sec" in caplog.text
-    assert "backward_sec" in caplog.text
-    assert "train_loss" in caplog.text
+    metrics.commit()

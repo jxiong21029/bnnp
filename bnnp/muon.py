@@ -1,49 +1,41 @@
-import logging
-
 import torch
-import torch.nn as nn
+from torch.optim.adam import adam
 
-ortho_dtype = (
+ORTH_DTYPE = (
     torch.bfloat16
     if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
     else torch.float32
 )
-
-log = logging.getLogger(__name__)
-
-# See: https://arxiv.org/abs/2505.16932
+# Newton-schulz coefficients from the Polar Express (https://arxiv.org/abs/2505.16932)
 COEFFS = [
-    (8.28721201814563, -23.595886519098837, 17.300387312530933),
-    (4.107059111542203, -2.9478499167379106, 0.5448431082926601),
-    (3.9486908534822946, -2.908902115962949, 0.5518191394370137),
-    (3.3184196573706015, -2.488488024314874, 0.51004894012372),
-    (2.300652019954817, -1.6689039845747493, 0.4188073119525673),
-    (1.891301407787398, -1.2679958271945868, 0.37680408948524835),
-    (1.8750014808534479, -1.2500016453999487, 0.3750001645474248),
-    (1.875, -1.25, 0.375),
+    (8.205160, -22.901935, 16.460725),
+    (4.066395, -2.861154, 0.518400),
+    (3.909595, -2.823352, 0.525037),
+    (3.285564, -2.415302, 0.485294),
+    (2.277873, -1.619822, 0.398481),
+    (1.872576, -1.230704, 0.358516),
+    (1.856437, -1.213239, 0.356800),
 ]
-COEFFS = [(a / 1.01, b / 1.01**3, c / 1.01**5) for a, b, c in COEFFS[:-1]] + COEFFS[-1:]
 
 
-def orthogonalize(G: torch.Tensor, steps: int) -> torch.Tensor:
+def orthogonalize(
+    G: torch.Tensor, steps: int, eps: float, spec_norm_scaling: bool = False
+) -> torch.Tensor:
     """Computes the semi-orthogonalization of G."""
-    assert G.ndim >= 2
-    X = G.type(ortho_dtype)
-    if G.size(-2) > G.size(-1):
+    assert G.ndim >= 2, "Newton-Schulz expects at least 2D tensor"
+    X = G.to(ORTH_DTYPE)
+    transposed = G.size(-2) > G.size(-1)
+    if transposed:
         X = X.mT
-
     # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + 1e-7)
-
-    for step in range(steps):
-        a, b, c = COEFFS[min(step, len(COEFFS) - 1)]
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + eps)
+    for a, b, c in COEFFS[:steps]:
         A = X @ X.mT
         X = a * X + (b * A + c * A @ A) @ X
-
-    if G.size(-2) > G.size(-1):
-        # Scale to ensure that the norm of the ROWS of G (i.e. change in output) is 1
-        X = X.mT * (G.size(-2) / G.size(-1)) ** 0.5
-
+    if transposed:
+        X = X.mT
+    if transposed or spec_norm_scaling:
+        X = X * (G.size(-2) / G.size(-1)) ** 0.5
     return X.type_as(G)
 
 
@@ -61,28 +53,46 @@ class Muon(torch.optim.Optimizer):
         self,
         params,
         lr: float = 0.01,
-        momentum: float = 0.9,
+        mu: float = 0.9,
         weight_decay: float = 0.01,
         nesterov: bool = True,
         ns_steps: int = 5,
+        adamw_betas: tuple[float, float] = (0.9, 0.95),
+        eps: float = 1e-8,
     ):
         defaults = dict(
             lr=lr,
-            momentum=momentum,
+            algorithm="muon",
+            mu=mu,
             weight_decay=weight_decay,
             nesterov=nesterov,
             ns_steps=ns_steps,
+            adamw_betas=adamw_betas,
+            eps=eps,
         )
         super().__init__(params, defaults)
 
     @torch.no_grad
     def step(self):
         for group in self.param_groups:
+            if group["algorithm"] == "adamw":
+                self.adamw_step(group)
+                continue
+            if group["algorithm"] != "muon":
+                raise ValueError(
+                    f"Unknown algorithm {group['algorithm']}, expected either 'muon' or 'adamw'"
+                )
+            if group["ns_steps"] > len(COEFFS):
+                raise ValueError(
+                    f"At most {len(COEFFS)} Newton-Schulz steps are supported"
+                )
+
             lr = group["lr"]
+            mu = group["mu"]
             weight_decay = group["weight_decay"]
-            momentum = group["momentum"]
             nesterov = group["nesterov"]
             ns_steps = group["ns_steps"]
+            eps = group["eps"]
 
             for param in group["params"]:
                 g = param.grad
@@ -93,57 +103,59 @@ class Muon(torch.optim.Optimizer):
                 if "momentum_buffer" not in state:
                     state["momentum_buffer"] = torch.zeros_like(g)
                 buf = state["momentum_buffer"]
-                buf.lerp_(g, 1 - momentum)
-                g = g.lerp_(buf, momentum) if nesterov else buf
-                g = orthogonalize(g, steps=ns_steps).add_(param, alpha=weight_decay)
+                buf.lerp_(g, 1 - mu)
+                g = g.lerp_(buf, mu) if nesterov else buf
+                g = orthogonalize(g, steps=ns_steps, eps=eps).add_(
+                    param, alpha=weight_decay
+                )
                 param.sub_(g, alpha=lr)
 
+    def adamw_step(self, group):
+        params = []
+        grads = []
+        exp_avgs = []
+        exp_avg_sqs = []
+        state_steps = []
+        for param in group["params"]:
+            if param.grad is None:
+                continue
 
-def auto_split_muon_params(
-    module: nn.Module, log_level=logging.INFO
-) -> tuple[
-    list[nn.Parameter], list[nn.Parameter], list[nn.Parameter], list[nn.Parameter]
-]:
-    muon_params = []
-    scalar_params = []
-    embeds_params = []
-    output_params = []
-    for name, p in module.named_parameters():
-        shape = tuple(p.shape)
-        if not p.requires_grad:
-            msg = f"{name} {shape} requires_grad=False, skipped"
-        elif p.ndim < 2 or (hasattr(p, "_is_scalar") and p._is_scalar):
-            msg = f"{name} {shape} (scalar) assigned to AdamW"
-            scalar_params.append(p)
-        elif hasattr(p, "_is_embed") and p._is_embed:
-            msg = f"{name} {shape} (embed) assigned to AdamW"
-            embeds_params.append(p)
-        elif hasattr(p, "_is_output") and p._is_output:
-            msg = f"{name} {shape} (output) assigned to AdamW"
-            output_params.append(p)
-        else:
-            if hasattr(p, "_ortho"):
-                raise ValueError(
-                    "_ortho is deprecated, use _is_embed or _is_output instead"
+            params.append(param)
+            grads.append(param.grad)
+            state = self.state[param]
+            if "step" not in state:
+                state["step"] = torch.tensor(0.0)  # Host on CPU.
+                state["exp_avg"] = torch.zeros_like(
+                    param, memory_format=torch.preserve_format
                 )
-            msg = f"{name} {shape} assigned to Muon"
-            muon_params.append(p)
-        log.log(log_level, msg)
+                state["exp_avg_sq"] = torch.zeros_like(
+                    param, memory_format=torch.preserve_format
+                )
+            exp_avgs.append(state["exp_avg"])
+            exp_avg_sqs.append(state["exp_avg_sq"])
+            state_steps.append(state["step"])
 
-    total_params = sum(
-        p.numel() for p in muon_params + scalar_params + embeds_params + output_params
-    )
-    total_param_tensors = sum(
-        len(group)
-        for group in (muon_params, scalar_params, embeds_params, output_params)
-    )
-    log.log(
-        log_level,
-        "parameter information:\n"
-        f"- muon params: {sum(p.numel() for p in muon_params):,} over {len(muon_params):,} tensors\n"
-        f"- scalar params: {sum(p.numel() for p in scalar_params):,} over {len(scalar_params):,} tensors\n"
-        f"- embeds params: {sum(p.numel() for p in embeds_params):,} over {len(embeds_params):,} tensors\n"
-        f"- output params: {sum(p.numel() for p in output_params):,} over {len(output_params):,} tensors\n"
-        f"total: {total_params:,} over {total_param_tensors:,} tensors",
-    )
-    return muon_params, scalar_params, embeds_params, output_params
+        beta1, beta2 = group["adamw_betas"]
+        adam(
+            params=params,
+            grads=grads,
+            exp_avgs=exp_avgs,
+            exp_avg_sqs=exp_avg_sqs,
+            max_exp_avg_sqs=[],
+            state_steps=state_steps,
+            foreach=True,
+            capturable=False,
+            differentiable=False,
+            fused=False,
+            grad_scale=None,
+            found_inf=None,
+            has_complex=False,
+            decoupled_weight_decay=True,  # AdamW
+            amsgrad=False,
+            beta1=beta1,
+            beta2=beta2,
+            lr=group["lr"],
+            weight_decay=group["weight_decay"],
+            eps=group["eps"],
+            maximize=False,
+        )
