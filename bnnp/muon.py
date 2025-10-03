@@ -21,7 +21,7 @@ COEFFS = [
 def orthogonalize(
     G: torch.Tensor, steps: int, eps: float, spec_norm_scaling: bool = False
 ) -> torch.Tensor:
-    """Computes the semi-orthogonalization of G."""
+    """Computes the semi-orthogonalization of G via Newton-Schulz iteration."""
     assert G.ndim >= 2, "Newton-Schulz expects at least 2D tensor"
     X = G.to(ORTH_DTYPE)
     transposed = G.size(-2) > G.size(-1)
@@ -42,11 +42,14 @@ def orthogonalize(
 class Muon(torch.optim.Optimizer):
     """MomentUm Orthogonalized by Newton-schulz.
 
-    See: https://kellerjordan.github.io/posts/muon/, https://arxiv.org/abs/2409.20325
+    NOTE: This implementation is intended for single-process or DDP training; not
+    compatible with FSDP.
 
     NOTE: This optimizer should not be used for the embedding layer, the final fully
     connected layer, or any {0,1}-D parameters; those should be optimized by a standard
     method (e.g., AdamW).
+
+    See: https://kellerjordan.github.io/posts/muon/, https://arxiv.org/abs/2409.20325
     """
 
     def __init__(
