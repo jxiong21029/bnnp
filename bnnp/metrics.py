@@ -119,7 +119,7 @@ class Metrics:
         self.timed_events.clear()
 
     @torch.compiler.disable()
-    def commit(self, **metrics):
+    def commit(self, _step: int | None = None, **metrics):
         """Log metrics to wandb if use_wandb, otherwise to standard library logging."""
         if not self.enabled:
             return
@@ -146,7 +146,10 @@ class Metrics:
         results = {k: float(v) for k, v in results.items()}
 
         if self.use_wandb and is_wandb_available:
-            wandb.log(results)
+            if _step is not None:
+                wandb.log(results, step=_step)
+            else:
+                wandb.log(results)
         else:
             logger.info(", ".join(f"{k}: {v:.4g}" for k, v in results.items()))
 
