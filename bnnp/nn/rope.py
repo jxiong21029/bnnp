@@ -27,7 +27,6 @@ class RoPE1d(nn.Module):
     def forward(self, input_BThd: Tensor, cos: Tensor, sin: Tensor):
         """Expects cos/sin with shapes either (B, T) or (T,)"""
         dtype = input_BThd.dtype
-        assert dtype == torch.bfloat16  # TODO remove
         x_BThF, y_BThF = input_BThd.chunk(2, dim=-1)
         x_out_BThF = x_BThF * cos.to(dtype) - y_BThF * sin.to(dtype)
         y_out_BThF = x_BThF * sin.to(dtype) + y_BThF * cos.to(dtype)
