@@ -7,12 +7,7 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
-from bnnp.nn import FusedLinear, RMSNorm
-
-
-class ReLU2(nn.Module):
-    def forward(self, x: torch.Tensor):
-        return F.relu(x).square()
+from bnnp.nn import FusedLinear, RMSNorm, ReLU2
 
 
 class MLPBlock(nn.Module):

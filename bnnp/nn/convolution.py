@@ -1,3 +1,7 @@
+"""
+Convs with Muon support.
+"""
+
 import math
 from typing import Optional, Union
 
