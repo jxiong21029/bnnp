@@ -14,5 +14,5 @@ dependencies = [
 line-length = 88
 exclude = ["data", "runs"]
 
-[tool.setuptools]
-packages = ["bnnp"]
+[tool.setuptools.packages.find]
+where = ["."]
