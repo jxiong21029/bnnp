@@ -7,6 +7,7 @@ from .components import (
     mpparam,
 )
 from .convolution import Conv1d, Conv2d, Conv3d
+from .rope import GGRoPENd, RoPE1d
 
 __all__ = [
     "Conv1d",
@@ -14,8 +15,10 @@ __all__ = [
     "Conv3d",
     "Embedding",
     "FusedLinear",
+    "GGRoPENd",
     "Output",
     "ReLU2",
+    "RoPE1d",
     "RMSNorm",
     "mpparam",
 ]

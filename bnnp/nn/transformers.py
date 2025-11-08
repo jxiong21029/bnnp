@@ -7,7 +7,7 @@ from torch.nn.attention.flex_attention import (
     flex_attention,
 )
 
-from bnnp.nn import FusedLinear, RMSNorm, ReLU2
+from bnnp.nn import FusedLinear, ReLU2, RMSNorm
 
 
 class MLPBlock(nn.Module):
