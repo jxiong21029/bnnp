@@ -15,4 +15,4 @@ line-length = 88
 exclude = ["data", "runs"]
 
 [tool.setuptools]
-packages = ["bnnp", "bnnp.nn"]
+packages = ["bnnp", "bnnp.nn", "bnnp.distmuon"]
