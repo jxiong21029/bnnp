@@ -1,11 +1,6 @@
 import torch
 from torch.optim.adam import adam
 
-ORTH_DTYPE = (
-    torch.bfloat16
-    if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
-    else torch.float32
-)
 # Newton-schulz coefficients from the Polar Express (https://arxiv.org/abs/2505.16932)
 COEFFS = [
     (8.205160, -22.901935, 16.460725),
@@ -18,12 +13,10 @@ COEFFS = [
 ]
 
 
-def orthogonalize(
-    G: torch.Tensor, steps: int, eps: float, spec_norm_scaling: bool = False
-) -> torch.Tensor:
+def orthogonalize(G: torch.Tensor, steps: int, eps: float) -> torch.Tensor:
     """Computes the semi-orthogonalization of G via Newton-Schulz iteration."""
     assert G.ndim >= 2, "Newton-Schulz expects at least 2D tensor"
-    X = G.to(ORTH_DTYPE)
+    X = G.bfloat16()
     transposed = G.size(-2) > G.size(-1)
     if transposed:
         X = X.mT
@@ -34,7 +27,6 @@ def orthogonalize(
         X = a * X + (b * A + c * A @ A) @ X
     if transposed:
         X = X.mT
-    if transposed or spec_norm_scaling:
         X = X * (G.size(-2) / G.size(-1)) ** 0.5
     return X.type_as(G)
 
