@@ -199,8 +199,6 @@ class DistMuon(Optimizer):
             for params in create_param_batches(
                 group_params, batch_size=self._world_size
             ):
-                print("here0", len(params), params[0].shape, params[0].dtype)
-
                 gradients = [p.grad for p in params]
                 states = [self._get_or_initialize_state(p, "muon") for p in params]
                 momentums = [s["momentum"] for s in states]
