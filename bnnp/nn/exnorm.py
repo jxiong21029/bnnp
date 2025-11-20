@@ -1,8 +1,11 @@
 import gc
+import warnings
 
 import torch
 import triton
 import triton.language as tl
+
+COMPILE_MODE = "default"
 
 
 @triton.jit
@@ -166,6 +169,8 @@ class ExNormFn(torch.autograd.Function):
 
 
 def exnorm(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+    # NOTE: From testing, exnorm is slower and uses more memory than the pure torch
+    # version when attached to an MLP, under torch.compile.
     return ExNormFn.apply(x, residual)
 
 
@@ -180,8 +185,9 @@ def benchmark():
 
     for name, method in (
         ("triton", exnorm),
+        ("triton-compiled", torch.compile(exnorm, mode=COMPILE_MODE)),
         ("torch", exnorm_ref),
-        ("torch-compiled", torch.compile(exnorm_ref, mode="max-autotune")),
+        ("torch-compiled", torch.compile(exnorm_ref, mode=COMPILE_MODE)),
     ):
         elapsed_ms = 0
         for i in range(iters):
@@ -204,16 +210,104 @@ def benchmark():
         print(f"{name}: {elapsed_ms / (iters - warmup):.3f} ms")
 
 
-def memory_test(method):
+def benchmark_with_mlp():
+    import torch.nn as nn
+
+    from bnnp.nn import FusedLinear, ReLU2, RMSNorm
+
+    iters = 120
+    warmup = 20
+
+    model = nn.Sequential(
+        RMSNorm(1024),
+        FusedLinear(1024, 4096),
+        ReLU2(),
+        FusedLinear(4096, 1024),
+    )
+    model.cuda()
+
+    for name, method in (
+        ("no-exnorm", lambda x, r: x + r),
+        ("no-exnorm-compiled", lambda x, r: x + r),
+        ("triton", exnorm),
+        ("triton-compiled", exnorm),
+        ("torch", exnorm_ref),
+        ("torch-compiled", exnorm_ref),
+    ):
+
+        def fwd(x):
+            r = model(x)
+            return method(x, r)
+
+        if name.endswith("-compiled"):
+            fwd = torch.compile(fwd, mode=COMPILE_MODE)
+
+        elapsed_ms = 0
+        for i in range(iters):
+            start = torch.cuda.Event(enable_timing=True)
+            stop = torch.cuda.Event(enable_timing=True)
+
+            x = torch.randn(16384, 1024, device="cuda", dtype=torch.bfloat16)
+            x.requires_grad_(True)
+
+            start.record()
+            y = fwd(x)
+            y.mean().backward()
+            stop.record()
+
+            model.zero_grad()
+
+            if i >= warmup:
+                torch.cuda.synchronize()
+                elapsed_ms += start.elapsed_time(stop)
+        print(f"{name}: {elapsed_ms / (iters - warmup):.3f} ms")
+
+
+def memory_test(method, compile: bool):
     gc.collect()
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
+
+    if compile:
+        method = torch.compile(method, mode=COMPILE_MODE)
 
     x = torch.randn(16384, 1024, device="cuda", dtype=torch.bfloat16)
     r = torch.randn_like(x)
     x.requires_grad_(True)
     r.requires_grad_(True)
     y = method(x, r)
+    y.mean().backward()
+    torch.cuda.synchronize()
+    return torch.cuda.max_memory_allocated()
+
+
+def memory_test_with_mlp(method, compile: bool):
+    import torch.nn as nn
+
+    from bnnp.nn import FusedLinear, ReLU2, RMSNorm
+
+    gc.collect()
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+
+    model = nn.Sequential(
+        RMSNorm(1024),
+        FusedLinear(1024, 4096),
+        ReLU2(),
+        FusedLinear(4096, 1024),
+    )
+    model.cuda()
+
+    def fwd(x):
+        r = model(x)
+        return method(x, r)
+
+    if compile:
+        fwd = torch.compile(fwd, mode=COMPILE_MODE)
+
+    x = torch.randn(16384, 1024, device="cuda", dtype=torch.bfloat16)
+    x.requires_grad_(True)
+    y = fwd(x)
     y.mean().backward()
     torch.cuda.synchronize()
     return torch.cuda.max_memory_allocated()
@@ -253,13 +347,30 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--memory", action="store_true")
+    parser.add_argument("--mlp", action="store_true")
     args = parser.parse_args()
     if args.memory:
-        print(memory_test(exnorm) / 1024**2, "MB triton")
-        print(memory_test(exnorm_ref) / 1024**2, "MB torch")
-        print(
-            memory_test(torch.compile(exnorm_ref, mode="max-autotune")) / 1024**2,
-            "MB torch-compiled",
-        )
+        results = []
+        if args.mlp:
+            for name, method in (
+                ("no-exnorm", lambda x, r: x + r),
+                ("triton", exnorm),
+                ("torch", exnorm_ref),
+            ):
+                for do_compile in (False, True):
+                    max_mem = memory_test_with_mlp(method, compile=do_compile) / 1024**2
+                    results.append(
+                        f"{name}{'-compiled' if do_compile else ''}: {max_mem:.3f} MB"
+                    )
+        else:
+            for name, method in (("triton", exnorm), ("torch", exnorm_ref)):
+                for do_compile in (False, True):
+                    max_mem = memory_test(method, compile=do_compile) / 1024**2
+                    results.append(
+                        f"{name}{'-compiled' if do_compile else ''}: {max_mem:.3f} MB"
+                    )
+        print("\n".join(results))
+    elif args.mlp:
+        benchmark_with_mlp()
     else:
         benchmark()
