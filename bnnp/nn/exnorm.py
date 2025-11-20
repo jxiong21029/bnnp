@@ -45,16 +45,7 @@ def _exnorm_fwd_fused(X, R, Y, stride, D, BLOCK_SIZE: tl.constexpr):
 
 
 @triton.jit
-def _exnorm_bwd_fused(
-    X,
-    R,
-    DY,
-    DX,
-    DR,
-    stride,  # row stride
-    D,
-    BLOCK_SIZE: tl.constexpr,
-):
+def _exnorm_bwd_fused(X, R, DY, DX, DR, stride, D, BLOCK_SIZE: tl.constexpr):
     row = tl.program_id(0)
 
     X_row = X + row * stride
@@ -174,7 +165,7 @@ class ExNormFn(torch.autograd.Function):
         return dx, dr
 
 
-def exnorm_triton(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+def exnorm(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
     return ExNormFn.apply(x, residual)
 
 
@@ -187,9 +178,11 @@ def benchmark():
     iters = 120
     warmup = 20
 
-    for name, method in (("triton", exnorm_triton), ("torch", exnorm_ref)):
-        if name == "torch":
-            method = torch.compile(method, mode="max-autotune")
+    for name, method in (
+        ("triton", exnorm),
+        ("torch", exnorm_ref),
+        ("torch-compiled", torch.compile(exnorm_ref, mode="max-autotune")),
+    ):
         elapsed_ms = 0
         for i in range(iters):
             start = torch.cuda.Event(enable_timing=True)
@@ -234,7 +227,7 @@ def test_accuracy():
     r_tri = r.clone()
     x_tri.requires_grad_(True)
     r_tri.requires_grad_(True)
-    y_tri = exnorm_triton(x_tri, r_tri)
+    y_tri = exnorm(x_tri, r_tri)
     y_tri.mean().backward()
     xg_tri = x_tri.grad
     rg_tri = r_tri.grad
@@ -262,7 +255,11 @@ if __name__ == "__main__":
     parser.add_argument("--memory", action="store_true")
     args = parser.parse_args()
     if args.memory:
-        print(memory_test(exnorm_triton) / 1024**2, "MB triton")
+        print(memory_test(exnorm) / 1024**2, "MB triton")
         print(memory_test(exnorm_ref) / 1024**2, "MB torch")
+        print(
+            memory_test(torch.compile(exnorm_ref, mode="max-autotune")) / 1024**2,
+            "MB torch-compiled",
+        )
     else:
         benchmark()

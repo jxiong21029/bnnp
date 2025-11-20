@@ -7,6 +7,7 @@ from .components import (
     mpparam,
 )
 from .convolution import Conv1d, Conv2d, Conv3d
+from .exnorm import exnorm
 from .rope import GGRoPENd, RoPE1d
 
 __all__ = [
@@ -20,5 +21,6 @@ __all__ = [
     "ReLU2",
     "RoPE1d",
     "RMSNorm",
+    "exnorm",
     "mpparam",
 ]
