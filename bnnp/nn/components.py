@@ -20,7 +20,7 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.dim = dim
         if affine:
-            self.weight = nn.Parameter(torch.ones(dim))
+            self.weight = nn.Parameter(torch.zeros(dim))
         else:
             self.register_parameter("weight", None)
 
@@ -28,7 +28,11 @@ class RMSNorm(nn.Module):
         assert x.size(-1) == self.dim, (
             f"expected x.size(-1) == {self.dim} but got {x.size(-1)=}"
         )
-        return F.rms_norm(x.float(), (x.size(-1),), self.weight).type_as(x)
+        return F.rms_norm(
+            x.float(),
+            (x.size(-1),),
+            None if self.weight is None else (self.weight + 1),
+        ).type_as(x)
 
 
 class FusedLinear(nn.Module):
