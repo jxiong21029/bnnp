@@ -10,18 +10,22 @@ class RoPE1d(nn.Module):
         min_freq: float,
         max_freq: float,
         p_zero_freqs: float,
+        device=None,
+        dtype=None,
     ):
         super().__init__()
         self.n_freqs = head_dim // 2
         omega = min_freq * (max_freq / min_freq) ** torch.linspace(
-            0, 1, round(self.n_freqs * (1 - p_zero_freqs))
+            0, 1, round(self.n_freqs * (1 - p_zero_freqs)), device=device, dtype=dtype
         )
-        omega = torch.cat((torch.zeros(self.n_freqs - len(omega)), omega))
+        omega = torch.cat(
+            (torch.zeros(self.n_freqs - len(omega), device=device, dtype=dtype), omega)
+        )
         self.register_buffer("freqs_F", omega)
 
     def precompute_rotations(self, pos: Tensor):
         """Expects pos with shape either (B, T) or (T,) and returns cos, sin each with shape either (B, T, 1, F) or (T, 1, F)"""
-        theta = pos[..., None, None].float() * self.freqs_F
+        theta = pos[..., None, None].float() * self.freqs_F  # pyright: ignore
         return torch.cos(theta), torch.sin(theta)
 
     def forward(self, input_BThd: Tensor, cos: Tensor, sin: Tensor):
@@ -47,24 +51,30 @@ class GGRoPENd(nn.Module):
         min_freq: float,
         max_freq: float,
         p_zero_freqs: float,
+        device=None,
+        dtype=None,
     ):
         super().__init__()
         self.n_freqs = head_dim // 2  # total number of frequencies (incl. 0)
         omega = min_freq * (max_freq / min_freq) ** torch.linspace(
-            0, 1, round(self.n_freqs * (1 - p_zero_freqs))
+            0, 1, round(self.n_freqs * (1 - p_zero_freqs)), device=device, dtype=dtype
         )
-        omega_F = torch.cat((torch.zeros(self.n_freqs - len(omega)), omega))
-        directions_hFP = self.make_directions(n_heads * self.n_freqs, pos_dim).view(
-            n_heads, self.n_freqs, pos_dim
+        omega_F = torch.cat(
+            (torch.zeros(self.n_freqs - len(omega), device=device, dtype=dtype), omega)
+        )
+        directions_hFP = (
+            self.make_directions(n_heads * self.n_freqs, pos_dim, device=device)
+            .view(n_heads, self.n_freqs, pos_dim)
+            .to(dtype)
         )
         self.register_buffer("freqs_hFP", directions_hFP * omega_F[None, :, None])
 
     @property
     def pos_dim(self) -> int:
-        return self.freqs_hFP.size(-1)
+        return self.freqs_hFP.size(-1)  # pyright: ignore
 
     @staticmethod
-    def make_directions(n: int, d: int):
+    def make_directions(n: int, d: int, device=None):
         def _phi(m: int):
             x = 2.0
             for _ in range(20):
@@ -72,13 +82,17 @@ class GGRoPENd(nn.Module):
             return x
 
         if d == 2:
-            angles = torch.arange(n, dtype=torch.float64) * (torch.pi / _phi(1))
+            angles = torch.arange(n, device=device, dtype=torch.float64) * (
+                torch.pi / _phi(1)
+            )
             directions = torch.stack((torch.cos(angles), torch.sin(angles)), dim=-1)
             return directions.float()
         else:
             g = _phi(d)
-            alpha = (1.0 / g) ** torch.arange(1, d + 1, dtype=torch.float64)
-            i = torch.arange(1, n + 1, dtype=torch.float64).unsqueeze(1)
+            alpha = (1.0 / g) ** torch.arange(
+                1, d + 1, device=device, dtype=torch.float64
+            )
+            i = torch.arange(1, n + 1, device=device, dtype=torch.float64).unsqueeze(1)
             z = torch.fmod(i * alpha, 1.0)
             directions = torch.erfinv(2.0 * z - 1.0)
             directions = directions / directions.norm(dim=1, keepdim=True)
@@ -86,7 +100,7 @@ class GGRoPENd(nn.Module):
 
     def precompute_rotations(self, pos: Tensor):
         """Expects pos with shape either (B, T, P) or (T, P)"""
-        theta = (pos[..., None, None, :].float() * self.freqs_hFP).sum(dim=-1)
+        theta = (pos[..., None, None, :].float() * self.freqs_hFP).sum(dim=-1)  # pyright: ignore
         return torch.cos(theta), torch.sin(theta)
 
     def forward(self, input_BThd: Tensor, cos: Tensor, sin: Tensor):

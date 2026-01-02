@@ -3,28 +3,31 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
 
 
-def mpparam(*size, gain=0.5):
+def mpparam(*size, gain=0.5, device=None, dtype=None):
     """Initialize a weight which maps RMS norm 1 inputs to RMS norm `gain` inputs."""
-    return nn.Parameter(torch.randn(*size) / math.sqrt(size[-1]) * gain)
+    return nn.Parameter(
+        torch.randn(*size, device=device, dtype=dtype) * (gain / math.sqrt(size[-1]))
+    )
 
 
 class ReLU2(nn.Module):
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: Tensor):
         return F.relu(x).square()
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, affine=False):
+    def __init__(self, dim: int, affine=False, device=None, dtype=None):
         super().__init__()
         self.dim = dim
         if affine:
-            self.weight = nn.Parameter(torch.zeros(dim))
+            self.weight = nn.Parameter(torch.zeros(dim, device=device, dtype=dtype))
         else:
             self.register_parameter("weight", None)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: Tensor):
         assert x.size(-1) == self.dim, (
             f"expected x.size(-1) == {self.dim} but got {x.size(-1)=}"
         )
@@ -44,20 +47,28 @@ class FusedLinear(nn.Module):
         scale: bool = False,
         zero_init: bool = False,
         gain: float = 0.5,
+        device=None,
+        dtype=None,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
 
-        self.weight = mpparam(out_features, in_features, gain=gain)
+        self.weight = mpparam(
+            out_features, in_features, gain=gain, device=device, dtype=dtype
+        )
 
         if bias:
-            self.bias = nn.Parameter(torch.zeros(out_features))
+            self.bias = nn.Parameter(
+                torch.zeros(out_features, device=device, dtype=dtype)
+            )
         else:
             self.register_parameter("bias", None)
 
         if scale:
-            self.scale = nn.Parameter(torch.ones(out_features))
+            self.scale = nn.Parameter(
+                torch.ones(out_features, device=device, dtype=dtype)
+            )
             if zero_init:
                 self.scale.data.zero_()
         else:
@@ -65,7 +76,7 @@ class FusedLinear(nn.Module):
             if zero_init:
                 self.weight.data.zero_()
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: Tensor):
         if self.scale is not None:
             # Fused per-channel scaling
             weight = self.weight * self.scale.unsqueeze(1)
@@ -80,24 +91,33 @@ class FusedLinear(nn.Module):
 
 
 class Embedding(nn.Embedding):
-    def __init__(self, num_embeddings: int, embedding_dim: int, gain=0.5, dtype=None):
+    def __init__(
+        self, num_embeddings: int, embedding_dim: int, gain=0.5, device=None, dtype=None
+    ):
         super().__init__(
-            num_embeddings=num_embeddings, embedding_dim=embedding_dim, dtype=dtype
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            device=device,
+            dtype=dtype,
         )
-        self.weight._is_embed = True
+        self.weight._is_embed = True  # pyright: ignore
         self.weight.data.mul_(gain)
 
 
 class Output(nn.Module):
-    def __init__(self, dim: int, out_dim: int, pad_to: int | None = None):
+    def __init__(
+        self, dim: int, out_dim: int, pad_to: int | None = None, device=None, dtype=None
+    ):
         super().__init__()
         pad_to = pad_to if pad_to is not None else out_dim
         padded_out_dim = (out_dim + pad_to - 1) // pad_to * pad_to
         self.out_dim = out_dim
 
-        self.norm = RMSNorm(dim)
-        self.linear = FusedLinear(dim, padded_out_dim, zero_init=True)
-        self.linear.weight._is_output = True
+        self.norm = RMSNorm(dim, device=device, dtype=dtype)
+        self.linear = FusedLinear(
+            dim, padded_out_dim, zero_init=True, device=device, dtype=dtype
+        )
+        self.linear.weight._is_output = True  # pyright: ignore
 
     def forward(self, x):
         return self.linear(self.norm(x))[..., : self.out_dim]
