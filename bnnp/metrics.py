@@ -38,14 +38,14 @@ class Metrics:
 
         self.context = ""
         self.n = defaultdict(int)
-        self.mean = defaultdict(float)
+        self.mean: dict[str, float | torch.Tensor] = defaultdict(float)
 
         self.timed_events = []
         self.curr_event = None
         self.start_t = None
         self.stop_t = None
 
-    @torch.compiler.disable()
+    @torch.compiler.disable
     @torch.no_grad()
     def push(self, **metrics):
         """Push a metric which is later averaged and logged."""
@@ -62,7 +62,7 @@ class Metrics:
             self.n[ck] += 1
             self.mean[ck] += delta / self.n[ck]
 
-    @torch.compiler.disable()
+    @torch.compiler.disable
     def tick(self, name: str | None):
         """Indicate the boundary of a timed interval.
 
@@ -81,7 +81,7 @@ class Metrics:
 
         if self.curr_event is not None:
             if self.use_cuda_events:
-                self.stop_t.record()
+                self.stop_t.record()  # pyright: ignore
             else:
                 self.stop_t = time.perf_counter()
             self.timed_events.append((self.curr_event, self.start_t, self.stop_t))
@@ -99,7 +99,7 @@ class Metrics:
         else:
             self.curr_event = None
 
-    @torch.compiler.disable()
+    @torch.compiler.disable
     def push_ticks(self):
         """Push buffer of timing events."""
         if not self.enabled:
@@ -118,7 +118,7 @@ class Metrics:
             self.mean[k] += delta / self.n[k]
         self.timed_events.clear()
 
-    @torch.compiler.disable()
+    @torch.compiler.disable
     def commit(self, _step: int | None = None, **metrics):
         """Log metrics to wandb if use_wandb, otherwise to standard library logging."""
         if not self.enabled:
@@ -138,7 +138,7 @@ class Metrics:
                 )
                 self.report_logging_gt_once = False
             if isinstance(self.mean[k], torch.Tensor):
-                results[k] = self.mean[k].to("cpu", non_blocking=True)
+                results[k] = self.mean[k].to("cpu", non_blocking=True)  # pyright: ignore
             else:
                 results[k] = self.mean[k]
         if torch.cuda.is_available():
@@ -147,15 +147,15 @@ class Metrics:
 
         if self.use_wandb and is_wandb_available:
             if _step is not None:
-                wandb.log(results, step=_step)
+                wandb.log(results, step=_step)  # pyright: ignore
             else:
-                wandb.log(results)
+                wandb.log(results)  # pyright: ignore
         else:
             logger.info(", ".join(f"{k}: {v:.4g}" for k, v in results.items()))
 
         for k in self.n:
             self.n[k] = 0
             if isinstance(self.mean[k], torch.Tensor):
-                self.mean[k].zero_()
+                self.mean[k].zero_()  # pyright: ignore
             else:
                 self.mean[k] = 0.0

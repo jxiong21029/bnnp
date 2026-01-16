@@ -6,11 +6,14 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-def mpparam(*size, gain=0.5, device=None, dtype=None):
+def mpparam(*size, gain=0.5, device=None, dtype=None, group=None):
     """Initialize a weight which maps RMS norm 1 inputs to RMS norm `gain` inputs."""
-    return nn.Parameter(
+    param = nn.Parameter(
         torch.randn(*size, device=device, dtype=dtype) * (gain / math.sqrt(size[-1]))
     )
+    if group is not None:
+        param._group = group  # pyright: ignore
+    return param
 
 
 class ReLU2(nn.Module):
@@ -24,6 +27,7 @@ class RMSNorm(nn.Module):
         self.dim = dim
         if affine:
             self.weight = nn.Parameter(torch.zeros(dim, device=device, dtype=dtype))
+            self.weight._group = "scalar"  # pyright: ignore
         else:
             self.register_parameter("weight", None)
 
@@ -43,7 +47,6 @@ class FusedLinear(nn.Module):
         self,
         in_features: int,
         out_features: int,
-        bias: bool = False,
         scale: bool = False,
         zero_init: bool = False,
         gain: float = 0.5,
@@ -57,13 +60,6 @@ class FusedLinear(nn.Module):
         self.weight = mpparam(
             out_features, in_features, gain=gain, device=device, dtype=dtype
         )
-
-        if bias:
-            self.bias = nn.Parameter(
-                torch.zeros(out_features, device=device, dtype=dtype)
-            )
-        else:
-            self.register_parameter("bias", None)
 
         if scale:
             self.scale = nn.Parameter(
@@ -83,11 +79,7 @@ class FusedLinear(nn.Module):
         else:
             weight = self.weight
 
-        out = x @ weight.type_as(x).t()
-
-        if self.bias is not None:
-            out = out + self.bias.type_as(out)
-        return out
+        return x @ weight.type_as(x).t()
 
 
 class Embedding(nn.Embedding):
@@ -100,7 +92,7 @@ class Embedding(nn.Embedding):
             device=device,
             dtype=dtype,
         )
-        self.weight._is_embed = True  # pyright: ignore
+        self.weight._group = "embed"  # pyright: ignore
         self.weight.data.mul_(gain)
 
 
@@ -109,15 +101,17 @@ class Output(nn.Module):
         self, dim: int, out_dim: int, pad_to: int | None = None, device=None, dtype=None
     ):
         super().__init__()
-        pad_to = pad_to if pad_to is not None else out_dim
-        padded_out_dim = (out_dim + pad_to - 1) // pad_to * pad_to
+        if pad_to is not None:
+            padded_out_dim = (out_dim + pad_to - 1) // pad_to * pad_to
+        else:
+            padded_out_dim = out_dim
         self.out_dim = out_dim
 
         self.norm = RMSNorm(dim, device=device, dtype=dtype)
         self.linear = FusedLinear(
             dim, padded_out_dim, zero_init=True, device=device, dtype=dtype
         )
-        self.linear.weight._is_output = True  # pyright: ignore
+        self.linear.weight._group = "output"  # pyright: ignore
 
     def forward(self, x):
         return self.linear(self.norm(x))[..., : self.out_dim]
