@@ -1,6 +1,7 @@
 import copy
 import os
 
+import pytest
 import torch
 import torch.nn as nn
 import tqdm
@@ -18,6 +19,7 @@ def test_muon():
     before = copy.deepcopy(model.weight.data)
 
     model(torch.randn(32)).mean().backward()
+    assert model.weight.grad is not None
     assert model.weight.grad.std() > 0
 
     optim.step()
@@ -31,12 +33,14 @@ def test_distmuon():
     before = copy.deepcopy(model.weight.data)
 
     model(torch.randn(32)).mean().backward()
+    assert model.weight.grad is not None
     assert model.weight.grad.std() > 0
 
     optim.step()
     assert not torch.allclose(model.weight.data, before)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda_unavailable")
 def train_muon_vs_distmuon():
     try:
 

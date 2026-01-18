@@ -111,7 +111,7 @@ class Output(nn.Module):
         self.linear = FusedLinear(
             dim, padded_out_dim, zero_init=True, device=device, dtype=dtype
         )
-        self.linear.weight._group = "output"  # pyright: ignore
+        self.linear.weight._group = "low_rank"  # pyright: ignore
 
     def forward(self, x):
         return self.linear(self.norm(x))[..., : self.out_dim]
