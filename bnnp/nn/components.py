@@ -12,7 +12,7 @@ def mpparam(*size, gain=0.5, device=None, dtype=None, group=None):
         torch.randn(*size, device=device, dtype=dtype) * (gain / math.sqrt(size[-1]))
     )
     if group is not None:
-        param._group = group  # pyright: ignore
+        param._group = group  # ty: ignore
     return param
 
 
@@ -27,7 +27,7 @@ class RMSNorm(nn.Module):
         self.dim = dim
         if affine:
             self.weight = nn.Parameter(torch.zeros(dim, device=device, dtype=dtype))
-            self.weight._group = "scalar"  # pyright: ignore
+            self.weight._group = "scalar"  # ty: ignore
         else:
             self.register_parameter("weight", None)
 
@@ -92,7 +92,7 @@ class Embedding(nn.Embedding):
             device=device,
             dtype=dtype,
         )
-        self.weight._group = "embed"  # pyright: ignore
+        self.weight._group = "embed"  # ty: ignore
         self.weight.data.mul_(gain)
 
 
@@ -111,7 +111,7 @@ class Output(nn.Module):
         self.linear = FusedLinear(
             dim, padded_out_dim, zero_init=True, device=device, dtype=dtype
         )
-        self.linear.weight._group = "low_rank"  # pyright: ignore
+        self.linear.weight._group = "low_rank"
 
     def forward(self, x):
         return self.linear(self.norm(x))[..., : self.out_dim]

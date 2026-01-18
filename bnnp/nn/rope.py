@@ -25,7 +25,7 @@ class RoPE1d(nn.Module):
 
     def precompute_rotations(self, pos: Tensor):
         """Expects pos with shape either (B, T) or (T,) and returns cos, sin each with shape either (B, T, 1, F) or (T, 1, F)"""
-        theta = pos[..., None, None].float() * self.freqs_F  # pyright: ignore
+        theta = pos[..., None, None].float() * self.freqs_F  # ty: ignore
         return torch.cos(theta), torch.sin(theta)
 
     def forward(self, input_BThd: Tensor, cos: Tensor, sin: Tensor):
@@ -71,7 +71,7 @@ class GGRoPENd(nn.Module):
 
     @property
     def pos_dim(self) -> int:
-        return self.freqs_hFP.size(-1)  # pyright: ignore
+        return self.freqs_hFP.size(-1)  # ty: ignore
 
     @staticmethod
     def make_directions(n: int, d: int, device=None):
@@ -100,7 +100,7 @@ class GGRoPENd(nn.Module):
 
     def precompute_rotations(self, pos: Tensor):
         """Expects pos with shape either (B, T, P) or (T, P)"""
-        theta = (pos[..., None, None, :].float() * self.freqs_hFP).sum(dim=-1)  # pyright: ignore
+        theta = (pos[..., None, None, :].float() * self.freqs_hFP).sum(dim=-1)  # ty: ignore
         return torch.cos(theta), torch.sin(theta)
 
     def forward(self, input_BThd: Tensor, cos: Tensor, sin: Tensor):

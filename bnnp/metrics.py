@@ -9,7 +9,7 @@ try:
 
     is_wandb_available = True
 except ImportError:
-    wandb = None
+    wandb = None  # ty: ignore
     is_wandb_available = False
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ class Metrics:
 
         if self.curr_event is not None:
             if self.use_cuda_events:
-                self.stop_t.record()  # pyright: ignore
+                self.stop_t.record()  # ty: ignore
             else:
                 self.stop_t = time.perf_counter()
             self.timed_events.append((self.curr_event, self.start_t, self.stop_t))
@@ -138,7 +138,7 @@ class Metrics:
                 )
                 self.report_logging_gt_once = False
             if isinstance(self.mean[k], torch.Tensor):
-                results[k] = self.mean[k].to("cpu", non_blocking=True)  # pyright: ignore
+                results[k] = self.mean[k].to("cpu", non_blocking=True)  # ty: ignore
             else:
                 results[k] = self.mean[k]
         if torch.cuda.is_available():
@@ -147,15 +147,15 @@ class Metrics:
 
         if self.use_wandb and is_wandb_available:
             if _step is not None:
-                wandb.log(results, step=_step)  # pyright: ignore
+                wandb.log(results, step=_step)
             else:
-                wandb.log(results)  # pyright: ignore
+                wandb.log(results)
         else:
             logger.info(", ".join(f"{k}: {v:.4g}" for k, v in results.items()))
 
         for k in self.n:
             self.n[k] = 0
             if isinstance(self.mean[k], torch.Tensor):
-                self.mean[k].zero_()  # pyright: ignore
+                self.mean[k].zero_()  # ty: ignore
             else:
                 self.mean[k] = 0.0

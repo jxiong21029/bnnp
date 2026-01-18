@@ -1,6 +1,5 @@
-import math
 from itertools import chain
-from typing import Callable, Generator, List, Optional, Tuple, Union
+from typing import Generator
 
 import torch
 import torch.distributed as dist
@@ -28,14 +27,12 @@ from .opt_utils import (
 )
 
 
-class NorMuon(Optimizer):
-    """
-    Distributed NorMuon optimizer for PyTorch FSDP2. Also compatible with DDP.
+class DistNorMuon(Optimizer):
+    """Distributed NorMuon optimizer for DDP.
 
     Args:
         params: Parameters for the optimizer.
-        distributed_mesh: DeviceMesh or ProcessGroup for distributed training.
-            Use DeviceMesh for FSDP2 and ProcessGroup for DistributedDataParallel.
+        distributed_mesh: ProcessGroup for distributed training.
         lr: Base learning rate. For NorMuon, this will be scaled based on the matrix dimensions.
             For element-wise update rules, this is the actual learning rate and no additional scaling is done.
         betas: (beta1, beta2) parameters for both AdamW and NorMuon's adaptive updates.
@@ -43,9 +40,12 @@ class NorMuon(Optimizer):
         eps: Small value to avoid division by zero.
         nesterov: Whether to use Nesterov momentum.
         lr_scaling: How to adjust the learning rate for Muon updates ("spectral_norm" or "rms_norm" or None).
-            "spectral_norm": Adjust based on spectral norm, for learning rate transfer across model scale.
-            "rms_norm": Adjust based on RMS norm, for learning rate compatibility with Adam/AdamW.
-            None: Do not adjust the learning rate.
+            "rms": Multiply update by sqrt(max(1, d_out / d_in)), for constant
+                average update norms, like in Keller Jordan's original implemenetation.
+            "mup": Multiply update by sqrt(d_out / d_in), to control the spectral
+                norm of the updates.
+            "moonlight": Multiply update by max(d_out, d_in) to maintain constant-sized
+                elementwise update RMS, similar to AdamW.
 
     Muon optimizer algorithm by Keller Jordan: https://kellerjordan.github.io/posts/muon/
     FSDP2 Muon uses all-to-all communications: https://www.essential.ai/blog/infra
@@ -55,13 +55,13 @@ class NorMuon(Optimizer):
     def __init__(
         self,
         params: ParamsT,
-        distributed_mesh: Optional[Union[DeviceMesh, ProcessGroup]] = None,
+        distributed_mesh: ProcessGroup | None = None,
         lr: float = 0.01,
         betas: tuple[float, float] = (0.9, 0.95),
         weight_decay: float = 0.01,
         eps: float = 1e-8,
         nesterov: bool = False,
-        lr_scaling: Optional[str] = "rms_norm",
+        lr_scaling: str = "rms",
     ):
         # Check hyperparameters
         if lr < 0.0:
@@ -141,7 +141,7 @@ class NorMuon(Optimizer):
         adamw_tasks = self._create_adamw_tasks(adamw_groups)
 
         all_tasks = chain(normuon_tasks, adamw_tasks)
-        runtime = AsyncRuntime(all_tasks, max_concurrent_tasks=3)
+        runtime = AsyncRuntime(all_tasks, max_concurrent_tasks=3)  # ty: ignore
         runtime.run()
 
         return loss
@@ -162,7 +162,7 @@ class NorMuon(Optimizer):
 
     def _create_normuon_tasks(
         self,
-        param_groups: List[dict],
+        param_groups: list[dict],
         algo_name: str = "normuon",
     ) -> Generator["AsyncTask", None, None]:
         """
@@ -202,100 +202,19 @@ class NorMuon(Optimizer):
                 momentums = [s["momentum"] for s in states]
                 variances_neuron = [s["variance_neuron"] for s in states]
 
-                # Get sharding state for DTensor
-                is_batch_sharded = False
-                is_matrix_sharded = False
-                sharded_mesh_dim = None
-                sharded_tensor_dim = None
-
-                if isinstance(params[0], DTensor):
-                    if not isinstance(self._distributed_mesh, DeviceMesh):
-                        raise RuntimeError(
-                            "Must create optimizer with DeviceMesh if using DTensor parameters."
-                        )
-
-                    # Find the sharded placement and get its mesh and tensor dimensions
-                    # Skip any Shard() placements on size-1 mesh dimension = Replicate()
-                    shard_placements = [
-                        (i, p)
-                        for i, p in enumerate(params[0].placements)
-                        if p.is_shard() and params[0].device_mesh.size(i) > 1
-                    ]
-
-                    # If we don't flatten 3D matrices, we can ignore shard placements along batch dimensions
-                    # Only keep placements that shard one of the two matrix dimensions
-                    matrix_dims = {params[0].ndim - 1, params[0].ndim - 2}
-                    is_batch_sharded = any(
-                        p.dim not in matrix_dims for _, p in shard_placements
+                yield AsyncTask(
+                    normuon_update_batch_async(
+                        X=pad_batch(params, self._world_size),
+                        G=pad_batch(gradients, self._world_size),  # ty: ignore
+                        M=pad_batch(momentums, self._world_size),
+                        V=pad_batch(variances_neuron, self._world_size),
+                        **normuon_update_args,  # ty: ignore
                     )
-                    shard_placements = [
-                        (i, p) for i, p in shard_placements if p.dim in matrix_dims
-                    ]
-
-                    # We currently do not support tensors sharded along the last dimension because NorMuon
-                    # normalization later assumes a full trailing axis when computing means.
-                    if any(p.dim == params[0].ndim - 1 for _, p in shard_placements):
-                        raise NotImplementedError(
-                            "NorMuon currently does not support parameters sharded along the last dimension. "
-                            "Please avoid shards at dim -1."
-                        )
-
-                    # Check that we have no more than 1 sharded matrix dimension
-                    # Note that non-flattened 3D tensors can have additional sharded batch dimensions
-                    # Flattened 3D tensors are limited to one sharded dimension out of all dimensions
-                    if len(shard_placements) == 1:
-                        is_matrix_sharded = True
-                        sharded_mesh_dim = shard_placements[0][0]
-                        sharded_tensor_dim = shard_placements[0][1].dim
-                    elif len(shard_placements) > 1:
-                        raise NotImplementedError(
-                            "NorMuon does not support parameters with multiple sharded dimensions."
-                        )
-
-                    # Check that the sharded mesh dimension matches optimizer's device mesh
-                    if (
-                        sharded_mesh_dim is not None
-                        and params[0].device_mesh.get_group(sharded_mesh_dim)
-                        != self._process_group
-                    ):
-                        raise RuntimeError(
-                            f"Got DTensor sharded over mesh dimension {sharded_mesh_dim} different from the optimizer's device mesh. "
-                            f"DTensor has mesh: {params[0].device_mesh}, placements: {params[0].placements}, but optimizer was created with mesh: {self._distributed_mesh}."
-                        )
-
-                # Special case for 3D tensors sharded along batch dimension
-                # As long as matrix dimensions are not sharded, each device will have whole matrices
-                # Each device already has different matrices of the batch, so we can't parallelize further
-                if is_batch_sharded and not is_matrix_sharded:
-                    for x, g, m, v in zip(
-                        params, gradients, momentums, variances_neuron
-                    ):
-                        yield AsyncTask(
-                            normuon_update_batch_async(
-                                X=[x],
-                                G=[g],
-                                M=[m],
-                                V=[v],
-                                shard_dim=None,  # No sharded matrix dim
-                                **normuon_update_args,
-                            )
-                        )
-                # Otherwise, we parallelize the Muon update across devices
-                else:
-                    yield AsyncTask(
-                        normuon_update_batch_async(
-                            X=pad_batch(params, self._world_size),
-                            G=pad_batch(gradients, self._world_size),
-                            M=pad_batch(momentums, self._world_size),
-                            V=pad_batch(variances_neuron, self._world_size),
-                            shard_dim=sharded_tensor_dim,
-                            **normuon_update_args,
-                        )
-                    )
+                )
 
     def _create_adamw_tasks(
         self,
-        param_groups: List[dict],
+        param_groups: list[dict],
         algo_name: str = "adamw",
     ) -> Generator["AsyncTask", None, None]:
         """
@@ -331,28 +250,27 @@ class NorMuon(Optimizer):
                     beta1=beta1,
                     beta2=beta2,
                     weight_decay=weight_decay,
-                    step=step,
-                    eps=eps,
+                    step=step,  # ty: ignore
+                    eps=eps,  # ty: ignore
                 )
             )
 
 
 def normuon_update_batch_async(
-    X: List[Tensor],  # Model weights (modified in place)
-    G: List[Tensor],  # Gradient
-    M: List[Tensor],  # Momentum buffer (modified in place)
-    V: List[Tensor],  # Variance neuron buffer (modified in place)
+    X: list[Tensor],  # Model weights (modified in place)
+    G: list[Tensor],  # Gradient
+    M: list[Tensor],  # Momentum buffer (modified in place)
+    V: list[Tensor],  # Variance neuron buffer (modified in place)
     lr: Tensor,  # Learning rate (scalar tensor)
     beta1: Tensor,  # Momentum decay
     beta2: Tensor,  # Variance decay
     weight_decay: Tensor,  # Weight decay (scalar tensor)
     eps: Tensor,  # eps (scalar tensor)
     nesterov: bool,  # Whether to use Nesterov momentum
-    lr_scaling: Optional[str],  # How to adjust learning rate
+    lr_scaling: str,  # How to adjust learning rate
     device_rank: int,  # Rank of the current device
     world_size: int,  # Total number of devices to parallelize over
-    shard_dim: Optional[int] = None,  # Shard dimension for DTensor (if applicable)
-    process_group: Optional[ProcessGroup] = None,
+    process_group: ProcessGroup | None = None,
 ) -> Generator[None, None, None]:
     """
     Batched version of Muon update. Batch size should be equal to number of GPUs.
@@ -371,55 +289,9 @@ def normuon_update_batch_async(
         nesterov=nesterov,
     )
 
-    # Get one whole matrix for each device to orthogonalize
-    if shard_dim is not None:
-        # Use all-to-all to transform from a batch of shards to a single whole matrix
-        # https://www.essential.ai/blog/infra
-        assert len(X) == world_size, "Batch size must equal world size"
-        assert process_group is not None, (
-            "process_group must be provided for sharded DTensors"
-        )
-        assert isinstance(X[0], DTensor), "X should contain DTensors"
-        assert not isinstance(U[0], DTensor), "U should contain local shards"
-        assert X[0].size(shard_dim) % world_size == 0, (
-            f"Shard dimension {shard_dim} size {X[0].size(shard_dim)} is not divisible by world size {world_size}."
-        )
-
-        # Allocate buffers to receive shards of one whole matrix from other devices
-        single_matrix_shards = [torch.empty_like(u) for u in U]
-
-        # Redistribute the shards to form one unique full tensor on each device
-        work = dist.all_to_all(
-            single_matrix_shards, U, group=process_group, async_op=True
-        )
-        yield
-        work.wait()
-
-        # Concatentate shards to form a whole matrix to orthogonalize
-        single_matrix = torch.cat(single_matrix_shards, dim=shard_dim)
-        single_matrix = muon_update_newton_schulz(
-            single_matrix,
-            eps=eps,
-        )
-
-        # Split result back into shards
-        # Contiguous is needed for all-to-all to work correctly
-        single_matrix_shards = [
-            x.contiguous()
-            for x in torch.tensor_split(single_matrix, world_size, dim=shard_dim)
-        ]
-
-        # Redistribute the orthogonalized tensor back to original layout
-        work = dist.all_to_all(
-            U, single_matrix_shards, group=process_group, async_op=True
-        )
-        #
-        yield
-        work.wait()
-
     # Matrices are not sharded, so we can distribute the batch across different devices
     # Get a single matrix of the batch corresponding to this device
-    elif len(U) > 1:
+    if len(U) > 1:
         assert len(U) == world_size, "Batch size must equal world size"
         assert process_group is not None
 
@@ -474,16 +346,15 @@ def normuon_update_batch_async(
 
 
 @torch.compile(fullgraph=True)
-def normuon_normalization(
-    U: List[Tensor],
-    V: List[Tensor],
-    beta2: Tensor,
-) -> List[Tensor]:
+def normuon_normalization(U: list[Tensor], V: list[Tensor], beta2: Tensor):
     """
     NorMuon normalization step after orthogonalization.
     Inputs and outputs should be lists of regular Tensor, not DTensor.
     This is a separate function for compatibility with torch.compile().
     """
+
+    # TODO update logic to use Adam-style beta2 correction
+
     V_dtype = V[0].dtype
     U = [u.to(dtype=V_dtype) for u in U]
 

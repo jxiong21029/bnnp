@@ -50,7 +50,7 @@ class DistMuon(Optimizer):
             "mup": Multiply update by sqrt(d_out / d_in), to control the spectral
                 norm of the updates.
             "moonlight": Multiply update by max(d_out, d_in) to maintain constant-sized
-                per-parameter update RMSes, similar to AdamW.
+                elementwise update RMS, similar to AdamW.
 
     Muon optimizer algorithm by Keller Jordan: https://kellerjordan.github.io/posts/muon/
     FSDP2 Muon uses all-to-all communications: https://www.essential.ai/blog/infra
@@ -149,7 +149,7 @@ class DistMuon(Optimizer):
         adamw_tasks = self._create_adamw_tasks(adamw_groups)
 
         all_tasks = chain(muon_tasks, adamw_tasks)
-        runtime = AsyncRuntime(all_tasks, max_concurrent_tasks=3)  # pyright: ignore
+        runtime = AsyncRuntime(all_tasks, max_concurrent_tasks=3)  # ty: ignore
         runtime.run()
 
         return loss
@@ -268,7 +268,7 @@ class DistMuon(Optimizer):
                                 G=[g],
                                 M=[m],
                                 shard_dim=None,  # No sharded matrix dim
-                                **muon_update_args,
+                                **muon_update_args,  # ty: ignore
                             )
                         )
                 # Otherwise, we parallelize the Muon update across devices
@@ -276,10 +276,10 @@ class DistMuon(Optimizer):
                     yield AsyncTask(
                         muon_update_batch_async(
                             X=pad_batch(params, self._world_size),
-                            G=pad_batch(gradients, self._world_size),
+                            G=pad_batch(gradients, self._world_size),  # ty: ignore
                             M=pad_batch(momentums, self._world_size),
                             shard_dim=sharded_tensor_dim,
-                            **muon_update_args,
+                            **muon_update_args,  # ty: ignore
                         )
                     )
 
@@ -319,8 +319,8 @@ class DistMuon(Optimizer):
                     beta1=beta1,
                     beta2=beta2,
                     weight_decay=weight_decay,
-                    step=step,
-                    eps=eps,
+                    step=step,  # ty: ignore
+                    eps=eps,  # ty: ignore
                 )
             )
 
@@ -377,7 +377,7 @@ def muon_update_batch_async(
         # Redistribute the shards to form one unique full tensor on each device
         work: Work = dist.all_to_all(
             single_matrix_shards, U, group=process_group, async_op=True
-        )  # pyright: ignore
+        )
         yield
         work.wait()
 
@@ -395,7 +395,7 @@ def muon_update_batch_async(
         # Redistribute the orthogonalized tensor back to original layout
         work: Work = dist.all_to_all(
             U, single_matrix_shards, group=process_group, async_op=True
-        )  # pyright: ignore
+        )
         yield
         work.wait()
 
@@ -416,7 +416,7 @@ def muon_update_batch_async(
         # All gather orthogonalized results from other devices into buffer
         work: Work = dist.all_gather(
             U, single_matrix.contiguous(), group=process_group, async_op=True
-        )  # pyright: ignore
+        )
         yield
         work.wait()
 
