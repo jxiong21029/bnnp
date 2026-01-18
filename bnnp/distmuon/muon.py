@@ -557,7 +557,7 @@ def adjust_lr_moonlight(lr, param_shape):
     Used in Moonlight. See https://arxiv.org/abs/2502.16982.
     """
     fan_out, fan_in = param_shape[-2:]
-    adjusted_lr = lr * max(fan_in, fan_out)
+    adjusted_lr = lr * math.sqrt(max(fan_in, fan_out))
     return adjusted_lr
 
 
