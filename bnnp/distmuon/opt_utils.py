@@ -1,12 +1,14 @@
 from collections import defaultdict
-from typing import Generator, List, Optional, Union
+from typing import Generator, TypeVar
 
 import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor
 
+T = TypeVar("T", Tensor, list[Tensor])
 
-def to_local(tensor: Union[Tensor, List[Tensor]]) -> Union[Tensor, List[Tensor]]:
+
+def to_local(tensor: T) -> T:
     """
     Convert a single DTensor or list of DTensors to local tensors.
     This is a no-op for regular tensors.
@@ -16,39 +18,9 @@ def to_local(tensor: Union[Tensor, List[Tensor]]) -> Union[Tensor, List[Tensor]]
     return [t.to_local() if isinstance(t, DTensor) else t for t in tensor]
 
 
-def dtensor_from_local(
-    tensor: Union[Tensor, List[Tensor]], ref: Tensor
-) -> Union[DTensor, List[DTensor]]:
-    """
-    Convert a single local Tensor or list of local Tensors to DTensor.
-    The reference tensor's device mesh and placements are used to create the DTensor.
-    if the reference tensor is not a DTensor, we return the input unmodified.
-    """
-    if not isinstance(ref, DTensor):
-        assert isinstance(ref, Tensor)
-        return tensor
-
-    device_mesh = ref.device_mesh
-    placements = ref.placements
-
-    # If we have a single tensor
-    if isinstance(tensor, Tensor):
-        assert not isinstance(tensor, DTensor)
-        return DTensor.from_local(
-            tensor, device_mesh=device_mesh, placements=placements
-        )
-
-    # We have a list of tensors
-    assert not isinstance(tensor[0], DTensor)
-    return [
-        DTensor.from_local(t, device_mesh=device_mesh, placements=placements)
-        for t in tensor
-    ]
-
-
 def create_param_batches(
-    params: List[Tensor], batch_size: int
-) -> Generator[List[Tensor], None, None]:
+    params: list[Tensor], batch_size: int
+) -> Generator[list[Tensor], None, None]:
     """
     Batch parameters into groups of size `batch_size`.
     Tensors in each batch will have identical shape, sharding, and dtype.
@@ -66,7 +38,7 @@ def create_param_batches(
             yield batch
 
 
-def pad_batch(batch: List[Tensor], batch_size: int) -> List[Tensor]:
+def pad_batch(batch: list[Tensor], batch_size: int) -> list[Tensor]:
     """
     Insert dummy tensors so the batch has exactly `batch_size` elements.
     """
@@ -112,7 +84,7 @@ class AsyncRuntime:
         self._task_gen = task_gen
         self._max_concurrent_tasks = max_concurrent_tasks
 
-    def _get_next_task(self) -> Optional["AsyncTask"]:
+    def _get_next_task(self) -> AsyncTask | None:
         try:
             task = next(self._task_gen)
             return task
@@ -122,7 +94,7 @@ class AsyncRuntime:
     def run(self):
         # Run the event loop until all tasks are completed
         have_new_tasks = True
-        previous_tasks: List["AsyncTask"] = []
+        previous_tasks: list[AsyncTask] = []
 
         while have_new_tasks or previous_tasks:
             # See if we can add another task

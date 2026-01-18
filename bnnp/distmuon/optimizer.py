@@ -9,13 +9,14 @@ Modified to use slightly different RMS learning rate scaling, as well as Polar E
 
 import math
 from itertools import chain
-from typing import Generator, List, Literal, Optional, Tuple, Union
+from typing import Generator, Literal
 
 import torch
 import torch.distributed as dist
 from torch import Tensor
-from torch.distributed import ProcessGroup
-from torch.distributed.tensor import DeviceMesh, DTensor
+from torch.distributed import ProcessGroup, Work
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from torch.optim.optimizer import Optimizer, ParamsT
 
 from .adamw import adamw_update_foreach
@@ -41,14 +42,15 @@ class DistMuon(Optimizer):
         mu: Momentum factor for Muon algorithm.
         adamw_betas: Tuple of (beta1, beta2) for AdamW.
         weight_decay: Weight decay factor.
-        epsilon: Small value to avoid division by zero.
         nesterov: Whether to use Nesterov momentum.
+        eps: Small value to avoid division by zero.
         lr_scaling: How to adjust the learning rate for Muon updates ("rms" or "spectral").
-            "rms": Multiply update by sqrt(max(1, fan_out / fan_in)), for constant
-                average-case RMS norm update sizes, similar to Keller Jordan's original
-                implementation.
-            "spectral": Multiply update by sqrt(fan_out / fan_in), to control the
-                spectral norm (worst-case) update size.
+            "rms": Multiply update by sqrt(max(1, d_out / d_in)), for constant
+                average update norms, like in Keller Jordan's original implemenetation.
+            "mup": Multiply update by sqrt(d_out / d_in), to control the spectral
+                norm of the updates.
+            "moonlight": Multiply update by max(d_out, d_in) to maintain constant-sized
+                per-parameter update RMSes, similar to AdamW.
 
     Muon optimizer algorithm by Keller Jordan: https://kellerjordan.github.io/posts/muon/
     FSDP2 Muon uses all-to-all communications: https://www.essential.ai/blog/infra
@@ -57,14 +59,14 @@ class DistMuon(Optimizer):
     def __init__(
         self,
         params: ParamsT,
-        distributed_mesh: Optional[Union[DeviceMesh, ProcessGroup]] = None,
+        distributed_mesh: DeviceMesh | ProcessGroup | None = None,
         lr: float = 0.01,
         mu: float = 0.95,
-        adamw_betas: Tuple[float, float] = (0.9, 0.95),
+        adamw_betas: tuple[float, float] = (0.9, 0.95),
         weight_decay: float = 0.01,
         nesterov: bool = True,
-        epsilon: float = 1e-8,
-        lr_scaling: Literal["rms", "spectral"] = "rms",
+        eps: float = 1e-8,
+        lr_scaling: Literal["rms", "mup", "moonlight"] = "rms",
     ):
         # Check hyperparameters
         if lr < 0.0:
@@ -73,9 +75,9 @@ class DistMuon(Optimizer):
             raise ValueError(f"Invalid momentum factor (mu): {mu}")
         if len(adamw_betas) != 2 or adamw_betas[0] < 0.0 or adamw_betas[1] < 0.0:
             raise ValueError(f"Invalid betas: {adamw_betas}")
-        if lr_scaling not in ("spectral", "rms"):
+        if lr_scaling not in ("rms", "mup", "moonlight"):
             raise ValueError(
-                f"Invalid lr_scaling value: {lr_scaling}. Must be 'rms' or 'spectral'."
+                f"Invalid lr_scaling value: {lr_scaling}. Must be 'rms', 'mup', or 'moonlight'."
             )
 
         # Default arguments for each param group
@@ -88,7 +90,7 @@ class DistMuon(Optimizer):
             nesterov=nesterov,
             algorithm="muon",
             step=0,
-            epsilon=epsilon,
+            eps=eps,
             lr_scaling=lr_scaling,
         )
         super().__init__(params, defaults)
@@ -147,7 +149,7 @@ class DistMuon(Optimizer):
         adamw_tasks = self._create_adamw_tasks(adamw_groups)
 
         all_tasks = chain(muon_tasks, adamw_tasks)
-        runtime = AsyncRuntime(all_tasks, max_concurrent_tasks=3)
+        runtime = AsyncRuntime(all_tasks, max_concurrent_tasks=3)  # pyright: ignore
         runtime.run()
 
         return loss
@@ -166,7 +168,7 @@ class DistMuon(Optimizer):
 
     def _create_muon_tasks(
         self,
-        param_groups: List[dict],
+        param_groups: list[dict],
     ) -> Generator["AsyncTask", None, None]:
         """
         Helper function to create batches of Muon matrices and generate
@@ -187,7 +189,7 @@ class DistMuon(Optimizer):
                 lr=torch.tensor(group["lr"]),
                 momentum=torch.tensor(group["mu"]),
                 weight_decay=torch.tensor(group["weight_decay"]),
-                epsilon=torch.tensor(group["epsilon"]),
+                eps=torch.tensor(group["eps"]),
                 nesterov=group["nesterov"],
                 lr_scaling=group["lr_scaling"],
                 device_rank=self._device_rank,
@@ -282,7 +284,7 @@ class DistMuon(Optimizer):
                     )
 
     def _create_adamw_tasks(
-        self, param_groups: List[dict]
+        self, param_groups: list[dict]
     ) -> Generator["AsyncTask", None, None]:
         """
         Helper function to generate AsyncTask objects for AdamW updates.
@@ -304,7 +306,7 @@ class DistMuon(Optimizer):
             beta1 = torch.tensor(group["beta1"])
             beta2 = torch.tensor(group["beta2"])
             weight_decay = torch.tensor(group["weight_decay"])
-            epsilon = torch.tensor(group["epsilon"])
+            eps = torch.tensor(group["eps"])
             step = torch.tensor(group["step"])
 
             yield AsyncTask(
@@ -318,25 +320,25 @@ class DistMuon(Optimizer):
                     beta2=beta2,
                     weight_decay=weight_decay,
                     step=step,
-                    epsilon=epsilon,
+                    eps=eps,
                 )
             )
 
 
 def muon_update_batch_async(
-    X: List[Tensor],  # Model weights (modified in place)
-    G: List[Tensor],  # Gradient
-    M: List[Tensor],  # Momentum buffer (modified in place)
+    X: list[Tensor],  # Model weights (modified in place)
+    G: list[Tensor],  # Gradient
+    M: list[Tensor],  # Momentum buffer (modified in place)
     lr: Tensor,  # Learning rate (scalar tensor)
     momentum: Tensor,  # Momentum factor (scalar tensor)
     weight_decay: Tensor,  # Weight decay (scalar tensor)
-    epsilon: Tensor,  # Epsilon (scalar tensor)
+    eps: Tensor,  # eps (scalar tensor)
     nesterov: bool,  # Whether to use Nesterov momentum
     lr_scaling: str,  # How to adjust learning rate
     device_rank: int,  # Rank of the current device
     world_size: int,  # Total number of devices to parallelize over
-    shard_dim: Optional[int] = None,  # Shard dimension for DTensor (if applicable)
-    process_group: Optional[ProcessGroup] = None,
+    shard_dim: int | None = None,  # Shard dimension for DTensor (if applicable)
+    process_group: ProcessGroup | None = None,
 ) -> Generator[None, None, None]:
     """
     Batched version of Muon update. Batch size should be equal to number of GPUs.
@@ -373,15 +375,15 @@ def muon_update_batch_async(
         single_matrix_shards = [torch.empty_like(u) for u in U]
 
         # Redistribute the shards to form one unique full tensor on each device
-        work = dist.all_to_all(
+        work: Work = dist.all_to_all(
             single_matrix_shards, U, group=process_group, async_op=True
-        )
+        )  # pyright: ignore
         yield
         work.wait()
 
         # Concatentate shards to form a whole matrix to orthogonalize
         single_matrix = torch.cat(single_matrix_shards, dim=shard_dim)
-        single_matrix = muon_update_newton_schulz(single_matrix, epsilon=epsilon)
+        single_matrix = muon_update_newton_schulz(single_matrix, eps=eps)
 
         # Split result back into shards
         # Contiguous is needed for all-to-all to work correctly
@@ -391,9 +393,9 @@ def muon_update_batch_async(
         ]
 
         # Redistribute the orthogonalized tensor back to original layout
-        work = dist.all_to_all(
+        work: Work = dist.all_to_all(
             U, single_matrix_shards, group=process_group, async_op=True
-        )
+        )  # pyright: ignore
         yield
         work.wait()
 
@@ -406,15 +408,15 @@ def muon_update_batch_async(
         single_matrix = U[device_rank]
         assert not isinstance(single_matrix, DTensor)
 
-        single_matrix = muon_update_newton_schulz(single_matrix, epsilon=epsilon)
+        single_matrix = muon_update_newton_schulz(single_matrix, eps=eps)
 
         # Allocate empty tensors to receive updates from other devices
         U = [torch.empty_like(u) for u in U]
 
         # All gather orthogonalized results from other devices into buffer
-        work = dist.all_gather(
+        work: Work = dist.all_gather(
             U, single_matrix.contiguous(), group=process_group, async_op=True
-        )
+        )  # pyright: ignore
         yield
         work.wait()
 
@@ -423,14 +425,16 @@ def muon_update_batch_async(
     # - 3D+ tensors sharded along a batch dimension (different whole matrices per device)
     else:
         assert len(U) == 1
-        U[0] = muon_update_newton_schulz(U[0], epsilon=epsilon)
+        U[0] = muon_update_newton_schulz(U[0], eps=eps)
 
     # Compute scaled learning rate
     # Do this before to_local(X) because we use the full tensor shape, not the shard shape
     if lr_scaling == "rms":
         adjusted_lr = adjust_lr_rms(lr, X[0].shape)
-    elif lr_scaling == "spectral":
-        adjusted_lr = adjust_lr_spectral(lr, X[0].shape)
+    elif lr_scaling == "mup":
+        adjusted_lr = adjust_lr_mup(lr, X[0].shape)
+    elif lr_scaling == "moonlight":
+        adjusted_lr = adjust_lr_moonlight(lr, X[0].shape)
     else:
         raise ValueError(f"Unknown lr_scaling value: {lr_scaling}")
 
@@ -445,31 +449,31 @@ def muon_update_batch_async(
 
 
 def adamw_update_foreach_async(
-    X: List[Tensor],  # Model weights (modified in place)
-    G: List[Tensor],  # Gradient
-    M: List[Tensor],  # Momentum buffer (modified in place)
-    V: List[Tensor],  # Variance buffer (modified in place)
+    X: list[Tensor],  # Model weights (modified in place)
+    G: list[Tensor],  # Gradient
+    M: list[Tensor],  # Momentum buffer (modified in place)
+    V: list[Tensor],  # Variance buffer (modified in place)
     lr: Tensor,  # Learning rate (scalar tensor)
     beta1: Tensor,  # Beta 1 (scalar tensor)
     beta2: Tensor,  # Beta 2 (scalar tensor)
     weight_decay: Tensor,  # Weight decay (scalar tensor)
     step: int,
-    epsilon: float,
+    eps: float,
 ) -> Generator[None, None, None]:
     """
     Async wrapper around foreach AdamW update.
     """
-    adamw_update_foreach(X, G, M, V, lr, beta1, beta2, weight_decay, step, epsilon)
+    adamw_update_foreach(X, G, M, V, lr, beta1, beta2, weight_decay, step, eps)
     yield
 
 
 @torch.compile(fullgraph=True)
 def muon_update_pre_orthogonalize(
-    G: List[Tensor],
-    M: List[Tensor],
+    G: list[Tensor],
+    M: list[Tensor],
     momentum: Tensor,
     nesterov: bool,
-) -> List[Tensor]:
+) -> list[Tensor]:
     """
     Update momentum with gradient and compute the input to orthogonalization.
     Inputs and outputs should be lists of regular Tensor, not DTensor.
@@ -496,8 +500,8 @@ def muon_update_pre_orthogonalize(
 
 @torch.compile(fullgraph=True)
 def muon_update_post_orthogonalize(
-    X: List[Tensor],
-    U: List[Tensor],
+    X: list[Tensor],
+    U: list[Tensor],
     base_lr: Tensor,
     adjusted_lr: Tensor,
     weight_decay: Tensor,
@@ -511,11 +515,10 @@ def muon_update_post_orthogonalize(
     torch._foreach_mul_(X, 1 - base_lr * weight_decay)
 
     # Weight update
-    U = torch._foreach_mul(U, adjusted_lr)
-    torch._foreach_sub_(X, U)
+    torch._foreach_sub_(X, torch._foreach_mul(U, adjusted_lr))
 
 
-def muon_update_newton_schulz(X: Tensor, epsilon: Tensor) -> Tensor:
+def muon_update_newton_schulz(X: Tensor, eps: Tensor) -> Tensor:
     """
     Flatten the input tensor if needed and call the Newton-Schulz function.
     """
@@ -524,27 +527,42 @@ def muon_update_newton_schulz(X: Tensor, epsilon: Tensor) -> Tensor:
         # Given 4D+ batch, flatten to 3D batch
         X = X.flatten(end_dim=-3)
 
-    return _newton_schulz_polar_express(X, epsilon=epsilon).reshape(original_shape)
+    return _newton_schulz_polar_express(X, eps=eps).reshape(original_shape)
 
 
 def adjust_lr_rms(lr, param_shape):
-    # Adjust learning rate for constant element-wise RMS norm, in expectation.
-    # Similar to Keller Jordan's original implementation.
+    """Adjust learning rate to ensure constant expected per-element output change RMS.
+
+    I.e. per parameter delta RMS is always 1 / sqrt(d_in). Used in Keller Jordan's
+    original Muon implementation.
+    """
     fan_out, fan_in = param_shape[-2:]
     adjusted_lr = lr * max(1, math.sqrt(fan_out / fan_in))
     return adjusted_lr
 
 
-def adjust_lr_spectral(lr, param_shape):
-    # Adjust learning rate to RMS operator norm 1
-    # https://arxiv.org/abs/2310.17813
+def adjust_lr_mup(lr, param_shape):
+    """Adjust learning rate to ensure constant RMS->RMS operator norm delta.
+
+    See https://arxiv.org/abs/2310.17813.
+    """
     fan_out, fan_in = param_shape[-2:]
     adjusted_lr = lr * math.sqrt(fan_out / fan_in)
     return adjusted_lr
 
 
+def adjust_lr_moonlight(lr, param_shape):
+    """Adjust learning rate to ensure constant elementwise parameter delta RMS.
+
+    Used in Moonlight. See https://arxiv.org/abs/2502.16982.
+    """
+    fan_out, fan_in = param_shape[-2:]
+    adjusted_lr = lr * max(fan_in, fan_out)
+    return adjusted_lr
+
+
 @torch.compile(fullgraph=True)
-def _newton_schulz_polar_express(G: Tensor, epsilon: float = 1e-7):
+def _newton_schulz_polar_express(G: Tensor, eps: float | Tensor = 1e-7):
     # Taken from: https://arxiv.org/abs/2505.16932
     polar_express_coeffs = [
         [8.20516041, -22.90193499, 16.46072491],
@@ -562,7 +580,7 @@ def _newton_schulz_polar_express(G: Tensor, epsilon: float = 1e-7):
     if transposed:
         X = X.mT
 
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + epsilon)
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + eps)
     # for step in range(steps):
     #     a, b, c = polar_express_coeffs[min(step, len(polar_express_coeffs) - 1)]
     for a, b, c in polar_express_coeffs:

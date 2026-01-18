@@ -15,7 +15,7 @@ def adamw_update(
     beta2: Tensor,  # Beta 2 (scalar tensor)
     weight_decay: Tensor,  # Weight decay (scalar tensor)
     step: int,
-    epsilon: float,
+    eps: float,
 ):
     """
     AdamW optimizer algorithm.
@@ -37,10 +37,10 @@ def adamw_update(
     # The goal is to compute the following in-place:
     # M = M / bias_correction1
     # V = V / bias_correction2
-    # X = X - lr * M / (sqrt(V) + epsilon)
+    # X = X - lr * M / (sqrt(V) + eps)
 
     # sqrt(V / bias_correction2) = sqrt(V) / sqrt(bias_correction2)
-    denom = V.sqrt().div_(bias_correction2_sqrt).add_(epsilon)
+    denom = V.sqrt().div_(bias_correction2_sqrt).add_(eps)
 
     # Adjust learning rate to include bias correction 1
     adj_lr = lr / bias_correction1
@@ -64,7 +64,7 @@ def adamw_update_foreach(
     beta2: Tensor,  # Beta 2 (scalar tensor)
     weight_decay: Tensor,  # Weight decay (scalar tensor)
     step: int,
-    epsilon: float,
+    eps: float,
 ):
     """
     AdamW optimizer algorithm (foreach implementation).
@@ -95,13 +95,13 @@ def adamw_update_foreach(
     # The goal is to compute the following in-place:
     # M = M / bias_correction1
     # V = V / bias_correction2
-    # X = X - lr * M / (sqrt(V) + epsilon)
+    # X = X - lr * M / (sqrt(V) + eps)
 
     # Compute the denominator for the weight update
     # sqrt(V / bias_correction2) = sqrt(V) / sqrt(bias_correction2)
     denom = torch._foreach_sqrt(V)
     torch._foreach_div_(denom, bias_correction2_sqrt)
-    torch._foreach_add_(denom, [epsilon] * batch_size)
+    torch._foreach_add_(denom, [eps] * batch_size)
 
     # Adjust learning rate to include bias correction 1
     adj_lr = lr / bias_correction1

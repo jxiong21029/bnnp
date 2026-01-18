@@ -15,9 +15,7 @@ COEFFS = [
 ]
 
 
-def orthogonalize(
-    G: torch.Tensor, steps: int, eps: float, lr_scaling: str
-) -> torch.Tensor:
+def orthogonalize(G: torch.Tensor, steps: int, eps: float) -> torch.Tensor:
     """Computes the semi-orthogonalization of G via Newton-Schulz iteration."""
     assert G.ndim >= 2, "Newton-Schulz expects at least 2D tensor"
     X = G.bfloat16()
@@ -31,33 +29,17 @@ def orthogonalize(
         X = a * X + (b * A + c * A @ A) @ X
     if transposed:
         X = X.mT
-    if lr_scaling == "mup" or (transposed and lr_scaling == "rms"):
-        X = X * (G.size(-2) / G.size(-1)) ** 0.5
-    elif lr_scaling == "moonlight":
-        X = X * max(G.size(-2), G.size(-1))
-    elif lr_scaling != "rms":
-        raise ValueError("Expected 'rms', 'mup', or 'moonlight' scaling")
     return X.type_as(G)
 
 
-class Muon(torch.optim.Optimizer):
-    """MomentUm Orthogonalized by Newton-schulz.
-
-    NOTE: This implementation is intended for single-process or DDP training; not
-    compatible with FSDP.
-
-    NOTE: This optimizer should not be used for the embedding layer, the final fully
-    connected layer, or any {0,1}-D parameters; those should be optimized by a standard
-    method (e.g., AdamW).
-
-    See: https://kellerjordan.github.io/posts/muon/, https://arxiv.org/abs/2409.20325
-    """
+class NorMuon(torch.optim.Optimizer):
+    """See: https://arxiv.org/abs/2510.05491."""
 
     def __init__(
         self,
         params,
         lr: float = 0.01,
-        mu: float = 0.9,
+        betas: tuple[float, float] = (0.9, 0.95),
         adamw_betas: tuple[float, float] = (0.9, 0.95),
         weight_decay: float = 0.01,
         nesterov: bool = True,
@@ -67,10 +49,10 @@ class Muon(torch.optim.Optimizer):
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
-        if mu < 0.0:
-            raise ValueError(f"Invalid momentum factor (mu): {mu}")
+        if len(betas) != 2 or betas[0] < 0.0 or betas[1] < 0.0:
+            raise ValueError(f"Invalid betas: {betas}")
         if len(adamw_betas) != 2 or adamw_betas[0] < 0.0 or adamw_betas[1] < 0.0:
-            raise ValueError(f"Invalid betas: {adamw_betas}")
+            raise ValueError(f"Invalid adamw betas: {adamw_betas}")
         if lr_scaling not in ("rms", "mup", "moonlight"):
             raise ValueError(
                 f"Invalid lr_scaling value: {lr_scaling}. Must be 'rms', 'mup', or 'moonlight'."
@@ -78,7 +60,7 @@ class Muon(torch.optim.Optimizer):
         defaults = dict(
             lr=lr,
             algorithm="muon",
-            mu=mu,
+            betas=betas,
             weight_decay=weight_decay,
             nesterov=nesterov,
             ns_steps=ns_steps,
@@ -104,7 +86,7 @@ class Muon(torch.optim.Optimizer):
                 )
 
             lr = group["lr"]
-            mu = group["mu"]
+            betas = group["betas"]
             weight_decay = group["weight_decay"]
             nesterov = group["nesterov"]
             ns_steps = group["ns_steps"]
@@ -117,14 +99,46 @@ class Muon(torch.optim.Optimizer):
                     continue
 
                 state = self.state[param]
-                if "momentum_buffer" not in state:
-                    state["momentum_buffer"] = torch.zeros_like(g)
-                buf = state["momentum_buffer"]
-                buf.lerp_(g, 1 - mu)
-                g = g.lerp_(buf, mu) if nesterov else buf
-                g = orthogonalize(
-                    g, steps=ns_steps, eps=eps, lr_scaling=lr_scaling
-                ).add_(param, alpha=weight_decay)
+                reduce_dim = -1 if param.size(-1) < param.size(-2) else -2
+                d_out, d_in = g.size(-2), g.size(-1)
+                if "m_buffer" not in state:
+                    state["m_buffer"] = torch.zeros_like(g)
+
+                    if reduce_dim == -2:
+                        reduced_shape = g.shape[-2] + (1, d_in)
+                    else:
+                        reduced_shape = g.shape[-2] + (d_out, 1)
+                    state["v_buffer"] = g.new_zeros(reduced_shape)
+                    state["v_correction"] = torch.tensor(
+                        0.0, device=g.device, dtype=torch.float32
+                    )
+
+                m = state["m_buffer"]
+                m.lerp_(g, 1 - betas[0])
+
+                g = g.lerp_(m, betas[0]) if nesterov else m
+                g = orthogonalize(g, steps=ns_steps, eps=eps)
+
+                v = state["v_buffer"]
+                v.lerp_(g.square().mean(dim=reduce_dim, keepdim=True), 1 - betas[1])
+                correction = state["v_correction"]
+                correction.lerp_(1.0, 1 - betas[1])
+
+                if lr_scaling == "moonlight":
+                    g.div_((v / correction).sqrt_().add_(1e-8))
+                elif lr_scaling == "rms":
+                    g.div_((v / correction).mul_(d_in).sqrt_().add_(1e-8))
+                elif lr_scaling == "mup":
+                    g.div_(
+                        (v / correction)
+                        .mul_(max(d_in, d_out) * d_in / d_out)
+                        .sqrt_()
+                        .add_(1e-8)
+                    )
+                else:
+                    raise ValueError(f"unknown value for lr_scaling: {lr_scaling}")
+
+                g = g.add_(param, alpha=weight_decay)
                 param.sub_(g, alpha=lr)
 
     def adamw_step(self, group):
