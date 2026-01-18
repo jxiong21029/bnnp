@@ -12,6 +12,7 @@ COEFFS = [
     (2.277873, -1.619822, 0.398481),
     (1.872576, -1.230704, 0.358516),
     (1.856437, -1.213239, 0.356800),
+    (1.856436, -1.213238, 0.356800),
 ]
 
 
@@ -24,7 +25,8 @@ def orthogonalize(G: torch.Tensor, steps: int, eps: float) -> torch.Tensor:
         X = X.mT
     # Ensure spectral norm is at most 1
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + eps)
-    for a, b, c in COEFFS[:steps]:
+    for i in range(steps):
+        a, b, c = COEFFS[min(i, len(COEFFS) - 1)]
         A = X @ X.mT
         X = a * X + (b * A + c * A @ A) @ X
     if transposed:
@@ -70,8 +72,8 @@ class NorMuon(torch.optim.Optimizer):
         )
         super().__init__(params, defaults)
 
-    @torch.no_grad
-    def step(self):
+    @torch.no_grad()
+    def step(self, closure=None):
         for group in self.param_groups:
             if group["algorithm"] == "adamw":
                 self.adamw_step(group)
@@ -79,10 +81,6 @@ class NorMuon(torch.optim.Optimizer):
             if group["algorithm"] != "muon":
                 raise ValueError(
                     f"Unknown algorithm {group['algorithm']}, expected either 'muon' or 'adamw'"
-                )
-            if group["ns_steps"] > len(COEFFS):
-                raise ValueError(
-                    f"At most {len(COEFFS)} Newton-Schulz steps are supported"
                 )
 
             lr = group["lr"]
@@ -105,11 +103,11 @@ class NorMuon(torch.optim.Optimizer):
                     state["m_buffer"] = torch.zeros_like(g)
 
                     if reduce_dim == -2:
-                        reduced_shape = g.shape[-2] + (1, d_in)
+                        reduced_shape = g.shape[:-2] + (1, d_in)
                     else:
-                        reduced_shape = g.shape[-2] + (d_out, 1)
+                        reduced_shape = g.shape[:-2] + (d_out, 1)
                     state["v_buffer"] = g.new_zeros(reduced_shape)
-                    state["v_correction"] = torch.tensor(
+                    state["step"] = torch.tensor(
                         0.0, device=g.device, dtype=torch.float32
                     )
 
@@ -121,8 +119,8 @@ class NorMuon(torch.optim.Optimizer):
 
                 v = state["v_buffer"]
                 v.lerp_(g.square().mean(dim=reduce_dim, keepdim=True), 1 - betas[1])
-                correction = state["v_correction"]
-                correction.lerp_(1.0, 1 - betas[1])
+                state["step"] += 1
+                correction = 1 - betas[1] ** (state["step"])
 
                 if lr_scaling == "moonlight":
                     g.div_((v / correction).sqrt_().add_(1e-8))

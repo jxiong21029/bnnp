@@ -12,6 +12,7 @@ COEFFS = [
     (2.277873, -1.619822, 0.398481),
     (1.872576, -1.230704, 0.358516),
     (1.856437, -1.213239, 0.356800),
+    (1.856436, -1.213238, 0.356800),
 ]
 
 
@@ -26,7 +27,8 @@ def orthogonalize(
         X = X.mT
     # Ensure spectral norm is at most 1
     X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + eps)
-    for a, b, c in COEFFS[:steps]:
+    for i in range(steps):
+        a, b, c = COEFFS[min(i, len(COEFFS) - 1)]
         A = X @ X.mT
         X = a * X + (b * A + c * A @ A) @ X
     if transposed:
@@ -34,7 +36,7 @@ def orthogonalize(
     if lr_scaling == "mup" or (transposed and lr_scaling == "rms"):
         X = X * (G.size(-2) / G.size(-1)) ** 0.5
     elif lr_scaling == "moonlight":
-        X = X * max(G.size(-2), G.size(-1))
+        X = X * max(G.size(-2), G.size(-1)) ** 0.5
     elif lr_scaling != "rms":
         raise ValueError("Expected 'rms', 'mup', or 'moonlight' scaling")
     return X.type_as(G)
@@ -88,8 +90,8 @@ class Muon(torch.optim.Optimizer):
         )
         super().__init__(params, defaults)
 
-    @torch.no_grad
-    def step(self):
+    @torch.no_grad()
+    def step(self, closure=None):
         for group in self.param_groups:
             if group["algorithm"] == "adamw":
                 self.adamw_step(group)
@@ -97,10 +99,6 @@ class Muon(torch.optim.Optimizer):
             if group["algorithm"] != "muon":
                 raise ValueError(
                     f"Unknown algorithm {group['algorithm']}, expected either 'muon' or 'adamw'"
-                )
-            if group["ns_steps"] > len(COEFFS):
-                raise ValueError(
-                    f"At most {len(COEFFS)} Newton-Schulz steps are supported"
                 )
 
             lr = group["lr"]
