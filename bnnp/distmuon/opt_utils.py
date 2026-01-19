@@ -14,8 +14,8 @@ def to_local(tensor: T) -> T:
     This is a no-op for regular tensors.
     """
     if isinstance(tensor, Tensor):
-        return tensor.to_local() if isinstance(tensor, DTensor) else tensor
-    return [t.to_local() if isinstance(t, DTensor) else t for t in tensor]
+        return tensor.to_local() if isinstance(tensor, DTensor) else tensor  # ty: ignore
+    return [t.to_local() if isinstance(t, DTensor) else t for t in tensor]  # ty: ignore
 
 
 def create_param_batches(

@@ -156,8 +156,14 @@ class DistNorMuon(Optimizer):
             state["momentum"] = torch.zeros_like(param)
             if algo == "adamw":
                 state["variance"] = torch.zeros_like(param)
-            if algo == "normuon":
-                state["variance_neuron"] = torch.zeros_like(param[..., 0:1])
+            else:
+                assert algo == "normuon"
+                reduce_dim = -1 if param.size(-1) < param.size(-2) else -2
+                if reduce_dim == -2:
+                    reduced_shape = param.shape[:-2] + (1, param.size(-1))
+                else:
+                    reduced_shape = param.shape[:-2] + (param.size(-2), 1)
+                state["variance"] = param.new_zeros(reduced_shape)
         return state
 
     def _create_normuon_tasks(
@@ -200,14 +206,14 @@ class DistNorMuon(Optimizer):
                 gradients = [p.grad for p in params]
                 states = [self._get_or_initialize_state(p, algo_name) for p in params]
                 momentums = [s["momentum"] for s in states]
-                variances_neuron = [s["variance_neuron"] for s in states]
+                variances = [s["variance"] for s in states]
 
                 yield AsyncTask(
                     normuon_update_batch_async(
                         X=pad_batch(params, self._world_size),
                         G=pad_batch(gradients, self._world_size),  # ty: ignore
                         M=pad_batch(momentums, self._world_size),
-                        V=pad_batch(variances_neuron, self._world_size),
+                        V=pad_batch(variances, self._world_size),
                         **normuon_update_args,  # ty: ignore
                     )
                 )
@@ -318,11 +324,7 @@ def normuon_update_batch_async(
         U[0] = muon_update_newton_schulz(U[0], eps=eps)
 
     # NorMuon normalization
-    U = normuon_normalization(
-        U,
-        V=to_local(V),
-        beta2=beta2,
-    )
+    U = normuon_normalization(U, V=to_local(V), beta2=beta2)
 
     # Compute scaled learning rate
     # Do this before to_local(X) because we use the full tensor shape, not the shard shape
@@ -334,6 +336,8 @@ def normuon_update_batch_async(
         adjusted_lr = adjust_lr_moonlight(lr, X[0].shape)
     else:
         raise ValueError(f"Unknown lr_scaling value: {lr_scaling}")
+
+    adjusted_lr = adjusted_lr / (max(U[0].size(-2), U[0].size(-1)) ** 0.5)
 
     # Update model parameters with orthogonalized output
     muon_update_post_orthogonalize(
@@ -353,40 +357,17 @@ def normuon_normalization(U: list[Tensor], V: list[Tensor], beta2: Tensor):
     This is a separate function for compatibility with torch.compile().
     """
 
-    # TODO update logic to use Adam-style beta2 correction
+    reduce_dim = -1 if U[0].size(-1) < U[0].size(-2) else -2
 
     V_dtype = V[0].dtype
     U = [u.to(dtype=V_dtype) for u in U]
 
-    norm_U = [
-        u.norm(p=2, dim=(-2, -1), keepdim=True) for u in U
-    ]  # list of ||u||_F, shape [*, 1, 1]
-
     U_sq = torch._foreach_mul(U, U)  # list of u*u, same shapes as U
-    neuron_norms = [
-        u_sq.mean(dim=-1, keepdim=True) for u_sq in U_sq
-    ]  # Shape: [*, rows, 1]
+    reduced_v = [u_sq.mean(dim=reduce_dim, keepdim=True) for u_sq in U_sq]
 
-    torch._foreach_lerp_(V, neuron_norms, 1 - beta2)  # Update variance neuron buffer
-
+    torch._foreach_lerp_(V, reduced_v, 1 - beta2)  # Update variance neuron buffer
     denom = torch._foreach_sqrt(V)  # list of sqrt(v)
     torch._foreach_add_(denom, 1e-8)  # denom[i] += 1e-8
     normalized_U = torch._foreach_div(U, denom)  # list of u / denom
-
-    norm_U_new = [
-        nu.norm(p=2, dim=(-2, -1), keepdim=True) for nu in normalized_U
-    ]  # list of ||normalized_u||_F, shape [*, 1, 1]
-
-    # Protect against division by zero when norm_U_new is zero.
-    # This can happen when U is all zeros (e.g., zero gradients from zero-initialized weights).
-    # In this case, norm_U is also zero, so after clamping norm_U_new to ε the ratio becomes 0/ε ≈ 0,
-    # and normalized_U * ratio correctly remains zero, preserving the zero state.
-    norm_U_new_safe = [nu.clamp(min=1e-8) for nu in norm_U_new]
-
-    ratio = torch._foreach_div(
-        norm_U, norm_U_new_safe
-    )  # list of ||u||_F / ||normalized_u||_F, shape [*, 1, 1]
-
-    torch._foreach_mul_(normalized_U, ratio)  # normalized_u[i] *= ratio
 
     return normalized_U
