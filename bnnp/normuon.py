@@ -125,13 +125,10 @@ class NorMuon(torch.optim.Optimizer):
                 if lr_scaling == "moonlight":
                     g.div_((v / correction).sqrt_().add_(1e-8))
                 elif lr_scaling == "rms":
-                    g.div_((v / correction).mul_(d_in).sqrt_().add_(1e-8))
+                    g.div_((v / correction).sqrt_().add_(1e-8)).mul_(d_in**-0.5)
                 elif lr_scaling == "mup":
-                    g.div_(
-                        (v / correction)
-                        .mul_(max(d_in, d_out) * d_in / d_out)
-                        .sqrt_()
-                        .add_(1e-8)
+                    g.div_((v / correction).sqrt_().add_(1e-8)).mul_(
+                        (d_out / d_in / max(d_in, d_out)) ** 0.5
                     )
                 else:
                     raise ValueError(f"unknown value for lr_scaling: {lr_scaling}")
