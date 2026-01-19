@@ -192,6 +192,7 @@ class DistNorMuon(Optimizer):
                 beta2=torch.tensor(group["beta2"]),
                 weight_decay=torch.tensor(group["weight_decay"]),
                 eps=torch.tensor(group["eps"]),
+                step=torch.tensor(group["step"]),
                 nesterov=group["nesterov"],
                 lr_scaling=group["lr_scaling"],
                 device_rank=self._device_rank,
@@ -271,7 +272,8 @@ def normuon_update_batch_async(
     beta1: Tensor,  # Momentum decay
     beta2: Tensor,  # Variance decay
     weight_decay: Tensor,  # Weight decay (scalar tensor)
-    eps: Tensor,  # eps (scalar tensor)
+    step: Tensor,
+    eps: Tensor,
     nesterov: bool,  # Whether to use Nesterov momentum
     lr_scaling: str,  # How to adjust learning rate
     device_rank: int,  # Rank of the current device
@@ -286,6 +288,7 @@ def normuon_update_batch_async(
 
     assert len(X) == len(G)
     assert len(X) == len(M)
+    assert len(X) == len(V)
 
     # Update momentum and compute the inputs for orthogonalization
     U = muon_update_pre_orthogonalize(
@@ -324,7 +327,7 @@ def normuon_update_batch_async(
         U[0] = muon_update_newton_schulz(U[0], eps=eps)
 
     # NorMuon normalization
-    U = normuon_normalization(U, V=to_local(V), beta2=beta2)
+    U = normuon_normalization(U, V=to_local(V), beta2=beta2, step=step)
 
     # Compute scaled learning rate
     # Do this before to_local(X) because we use the full tensor shape, not the shard shape
@@ -351,7 +354,9 @@ def normuon_update_batch_async(
 
 
 @torch.compile(fullgraph=True)
-def normuon_normalization(U: list[Tensor], V: list[Tensor], beta2: Tensor):
+def normuon_normalization(
+    U: list[Tensor], V: list[Tensor], beta2: Tensor, step: Tensor
+):
     """
     NorMuon normalization step after orthogonalization.
     Inputs and outputs should be lists of regular Tensor, not DTensor.
@@ -368,6 +373,9 @@ def normuon_normalization(U: list[Tensor], V: list[Tensor], beta2: Tensor):
 
     torch._foreach_lerp_(V, reduced_v, 1 - beta2)  # Update variance neuron buffer
     denom = torch._foreach_sqrt(V)  # list of sqrt(v)
+    bias_correction2 = 1 - beta2**step
+    bias_correction2_sqrt = bias_correction2.sqrt()
+    torch._foreach_div_(denom, bias_correction2_sqrt)
     torch._foreach_add_(denom, 1e-8)  # denom[i] += 1e-8
     normalized_U = torch._foreach_div(U, denom)  # list of u / denom
 

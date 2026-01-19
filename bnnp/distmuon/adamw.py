@@ -1,5 +1,3 @@
-from typing import List
-
 import torch
 from torch import Tensor
 
@@ -55,10 +53,10 @@ def adamw_update(
 
 @torch.compile(fullgraph=True)
 def adamw_update_foreach(
-    X: List[Tensor],  # Model weights (modified in place)
-    G: List[Tensor],  # Gradient
-    M: List[Tensor],  # Momentum buffer (modified in place)
-    V: List[Tensor],  # Variance buffer (modified in place)
+    X: list[Tensor],  # Model weights (modified in place)
+    G: list[Tensor],  # Gradient
+    M: list[Tensor],  # Momentum buffer (modified in place)
+    V: list[Tensor],  # Variance buffer (modified in place)
     lr: Tensor,  # Learning rate (scalar tensor)
     beta1: Tensor,  # Beta 1 (scalar tensor)
     beta2: Tensor,  # Beta 2 (scalar tensor)
