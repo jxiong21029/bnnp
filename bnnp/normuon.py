@@ -42,7 +42,6 @@ class NorMuon(torch.optim.Optimizer):
         params,
         lr: float = 0.01,
         betas: tuple[float, float] = (0.9, 0.95),
-        adamw_betas: tuple[float, float] = (0.9, 0.95),
         weight_decay: float = 0.01,
         nesterov: bool = True,
         ns_steps: int = 5,
@@ -53,8 +52,6 @@ class NorMuon(torch.optim.Optimizer):
             raise ValueError(f"Invalid learning rate: {lr}")
         if len(betas) != 2 or betas[0] < 0.0 or betas[1] < 0.0:
             raise ValueError(f"Invalid betas: {betas}")
-        if len(adamw_betas) != 2 or adamw_betas[0] < 0.0 or adamw_betas[1] < 0.0:
-            raise ValueError(f"Invalid adamw betas: {adamw_betas}")
         if lr_scaling not in ("rms", "mup", "moonlight"):
             raise ValueError(
                 f"Invalid lr_scaling value: {lr_scaling}. Must be 'rms', 'mup', or 'moonlight'."
@@ -66,7 +63,6 @@ class NorMuon(torch.optim.Optimizer):
             weight_decay=weight_decay,
             nesterov=nesterov,
             ns_steps=ns_steps,
-            adamw_betas=adamw_betas,
             eps=eps,
             lr_scaling=lr_scaling,
         )
@@ -122,15 +118,12 @@ class NorMuon(torch.optim.Optimizer):
                 state["step"] += 1
                 correction = 1 - betas[1] ** (state["step"])
 
-                if lr_scaling == "moonlight":
-                    g.div_((v / correction).sqrt_().add_(1e-8))
-                elif lr_scaling == "rms":
-                    g.div_((v / correction).sqrt_().add_(1e-8)).mul_(d_in**-0.5)
+                g.div_((v / correction).sqrt_().add_(1e-8))
+                if lr_scaling == "rms":
+                    g.mul_(d_in**-0.5)
                 elif lr_scaling == "mup":
-                    g.div_((v / correction).sqrt_().add_(1e-8)).mul_(
-                        (d_out / d_in / max(d_in, d_out)) ** 0.5
-                    )
-                else:
+                    g.mul_((d_out / d_in / max(d_in, d_out)) ** 0.5)
+                elif lr_scaling != "moonlight":
                     raise ValueError(f"unknown value for lr_scaling: {lr_scaling}")
 
                 g = g.add_(param, alpha=weight_decay)
@@ -161,7 +154,7 @@ class NorMuon(torch.optim.Optimizer):
             exp_avg_sqs.append(state["exp_avg_sq"])
             state_steps.append(state["step"])
 
-        beta1, beta2 = group["adamw_betas"]
+        beta1, beta2 = group["betas"]
         adam(
             params=params,
             grads=grads,

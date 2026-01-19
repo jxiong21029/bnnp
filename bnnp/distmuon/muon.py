@@ -562,7 +562,7 @@ def adjust_lr_moonlight(lr, param_shape):
 
 
 @torch.compile(fullgraph=True)
-def _newton_schulz_polar_express(G: Tensor, eps: float | Tensor = 1e-7):
+def _newton_schulz_polar_express(G: Tensor, eps: float | Tensor = 1e-8):
     # Taken from: https://arxiv.org/abs/2505.16932
     polar_express_coeffs = [
         [8.20516041, -22.90193499, 16.46072491],

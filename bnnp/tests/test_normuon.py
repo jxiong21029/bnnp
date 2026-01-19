@@ -102,7 +102,11 @@ def train_normuon_vs_distnormuon():
             raw_model.load_state_dict(init_state)
             if i == 0:
                 optim = NorMuon(
-                    model.parameters(), lr=0.01, betas=(0.9, 0.95), weight_decay=0.01
+                    model.parameters(),
+                    lr=0.01,
+                    betas=(0.9, 0.95),
+                    weight_decay=0.01,
+                    ns_steps=5,
                 )
             else:
                 optim = DistNorMuon(
@@ -145,7 +149,9 @@ def train_normuon_vs_distnormuon():
             results.append(torch.stack(losses))
             del optim, loss, rng
 
-        print((results[0] - results[1]).abs().mean())
+        print(
+            (results[0] - results[1]).abs().mean(), results[0].std(), results[1].std()
+        )
     finally:
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
