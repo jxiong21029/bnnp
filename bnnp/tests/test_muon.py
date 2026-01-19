@@ -40,7 +40,6 @@ def test_distmuon():
     assert not torch.allclose(model.weight.data, before)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda_unavailable")
 def train_muon_vs_distmuon():
     try:
 

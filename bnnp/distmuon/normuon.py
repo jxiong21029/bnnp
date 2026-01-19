@@ -337,6 +337,7 @@ def normuon_update_batch_async(
     else:
         raise ValueError(f"Unknown lr_scaling value: {lr_scaling}")
 
+    # Compensate for removing norm adjustment from normuon_normalization
     adjusted_lr = adjusted_lr / (max(U[0].size(-2), U[0].size(-1)) ** 0.5)
 
     # Update model parameters with orthogonalized output
