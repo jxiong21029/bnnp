@@ -98,7 +98,13 @@ class Embedding(nn.Embedding):
 
 class Output(nn.Module):
     def __init__(
-        self, dim: int, out_dim: int, pad_to: int | None = None, device=None, dtype=None
+        self,
+        dim: int,
+        out_dim: int,
+        pad_to: int | None = None,
+        in_affine: bool = False,
+        device=None,
+        dtype=None,
     ):
         super().__init__()
         if pad_to is not None:
@@ -107,7 +113,7 @@ class Output(nn.Module):
             padded_out_dim = out_dim
         self.out_dim = out_dim
 
-        self.norm = RMSNorm(dim, device=device, dtype=dtype)
+        self.norm = RMSNorm(dim, affine=in_affine, device=device, dtype=dtype)
         self.linear = FusedLinear(
             dim, padded_out_dim, zero_init=True, device=device, dtype=dtype
         )
