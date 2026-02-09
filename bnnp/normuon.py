@@ -58,7 +58,7 @@ class NorMuon(torch.optim.Optimizer):
             )
         defaults = dict(
             lr=lr,
-            algorithm="muon",
+            algorithm="normuon",
             betas=betas,
             weight_decay=weight_decay,
             nesterov=nesterov,
@@ -74,9 +74,9 @@ class NorMuon(torch.optim.Optimizer):
             if group["algorithm"] == "adamw":
                 self.adamw_step(group)
                 continue
-            if group["algorithm"] != "muon":
+            if group["algorithm"] != "normuon":
                 raise ValueError(
-                    f"Unknown algorithm {group['algorithm']}, expected either 'muon' or 'adamw'"
+                    f"Unknown algorithm {group['algorithm']}, expected either 'normuon' or 'adamw'"
                 )
 
             lr = group["lr"]
