@@ -1,18 +1,20 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "bnnp"
-version = "0.1"
+version = "0.2.0"
 dependencies = [
     "pytest",
     "torch",
 ]
 
 [tool.ruff]
-line-length = 88
-exclude = ["data", "runs"]
+line-length = 100
+exclude = ["__pycache__"]
 
-[tool.setuptools]
-packages = ["bnnp", "bnnp.nn", "bnnp.distmuon"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bnnp*"]
+namespaces = false
