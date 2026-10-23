@@ -11,12 +11,7 @@ import torch.distributed as dist
 import tqdm
 from pydantic import BaseModel, ConfigDict
 
-try:
-    import wandb
-except ImportError:
-    wandb = None
-
-from .metrics import Metrics
+from .metrics import LoggingBackend, Metrics
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +21,10 @@ class TrainerConfig(BaseModel):
 
     run_name: str | None = None
     run_base_dir: str
-    use_wandb: bool
-    wandb_entity: str = "archibox"
-    wandb_project: str = "wddq"
-    wandb_group: str
+    logging_backend: LoggingBackend = "logging"
+    wandb_entity: str | None = None
+    wandb_project: str | None = None
+    wandb_group: str | None = None
     seed: int
 
     n_steps: int
@@ -83,10 +78,13 @@ class BaseTrainer:
         self.device = torch.device("cuda", self.local_rank)
 
         self.metrics = Metrics(
-            use_wandb=self.is_main_process and config.use_wandb,
             enabled=self.is_main_process,
             use_cuda_events=True,
+            logging_backend=config.logging_backend,
         )
+        self.logging_backend = self.metrics.logging_backend
+        self._logging_module = self.metrics._logging_module
+        self._owns_logging_run = False
         self.profiler: torch.profiler.profile | None = None
 
         self.metrics.enabled = self.is_main_process
@@ -109,11 +107,22 @@ class BaseTrainer:
         logging.getLogger().setLevel(logging.INFO if self.is_main_process else logging.WARNING)
         logger.info("config: " + config.model_dump_json(indent=4))
 
+        try:
+            self._setup_run()
+        except BaseException:
+            self._finish_logging()
+            raise
+
+        self.step = 0
+        self.metrics.context = "train_"
+
+    def _setup_run(self):
+        config = self.config
         run_base_dir = Path(config.run_base_dir)
         run_base_dir.mkdir(parents=True, exist_ok=True)
-        if config.use_wandb:
-            if self.is_main_process and wandb is not None:
-                wandb.init(
+        if self.logging_backend == "wandb":
+            if self.is_main_process:
+                run = self._logging_module.init(  # type: ignore
                     entity=config.wandb_entity,
                     project=config.wandb_project,
                     name=config.run_name,
@@ -122,8 +131,9 @@ class BaseTrainer:
                     group=config.wandb_group,
                     resume="never",
                 )
-                assert wandb.run is not None
-                self.run_dir = Path(wandb.run.dir)
+                self._owns_logging_run = True
+                assert run is not None
+                self.run_dir = Path(run.dir)
             if self.is_distributed:
                 obj = [str(self.run_dir) if self.is_main_process else None]
                 dist.broadcast_object_list(obj, src=0)
@@ -135,7 +145,7 @@ class BaseTrainer:
         logger.info(f"[rank{self.rank}] run_dir: {self.run_dir}")
 
         if self.is_main_process:
-            self.run_dir.mkdir(exist_ok=True)
+            self.run_dir.mkdir(parents=True, exist_ok=True)
 
         if self.is_main_process:
 
@@ -192,8 +202,10 @@ class BaseTrainer:
             self.profiler.start()
             logger.info(f"profiler enabled. Writing traces to {profile_dir}")
 
-        self.step = 0
-        self.metrics.context = "train_"
+    def _finish_logging(self):
+        if self._owns_logging_run:
+            self._owns_logging_run = False
+            self._logging_module.finish()  # type: ignore
 
     def next_seed(self) -> int:
         self._local_seed, subseed = split_rng(self._local_seed, 2)
@@ -218,7 +230,7 @@ class BaseTrainer:
             with tqdm.tqdm(
                 total=self.config.n_steps,
                 desc="train",
-                disable=(not self.is_main_process) or (not self.config.use_wandb),
+                disable=(not self.is_main_process) or self.logging_backend == "logging",
                 **self.config.tqdm_kwargs,
             ) as pbar:
                 if self.step > 0:
@@ -235,8 +247,11 @@ class BaseTrainer:
                     if self.profiler is not None:
                         self.profiler.step()
         finally:
-            if self.profiler is not None:
-                self.profiler.stop()
+            try:
+                if self.profiler is not None:
+                    self.profiler.stop()
+            finally:
+                self._finish_logging()
 
     def train_step(self):
         pass

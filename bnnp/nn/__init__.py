@@ -6,10 +6,4 @@ from .components import (
     mpparam,
 )
 
-__all__ = [
-    "Embedding",
-    "Linear",
-    "RMSNorm",
-    "ReLU2",
-    "mpparam",
-]
+__all__ = ["Embedding", "Linear", "RMSNorm", "ReLU2", "mpparam"]

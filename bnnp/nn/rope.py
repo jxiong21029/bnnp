@@ -122,7 +122,7 @@ class RoPENd(_RoPEBase):
 
     def precompute_rotations(
         self,
-        size: tuple[int, int] | None,
+        size: tuple[int, int] | None = None,
         n_extra: int = 0,
         base_hw: tuple[int, int] | None = None,
         positions: Tensor | None = None,

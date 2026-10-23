@@ -34,13 +34,32 @@ class RMSNorm(nn.Module):
         ).type_as(x)
 
 
+class Embedding(nn.Embedding):
+    def __init__(self, num_embeddings: int, embedding_dim: int, gain=0.5, device=None, dtype=None):
+        self.gain = gain
+        super().__init__(
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            device=device,
+            dtype=dtype,
+        )
+
+    @torch.no_grad()
+    def reset_parameters(self):
+        super().reset_parameters()
+        self.weight.mul_(self.gain / self.embedding_dim**0.5)
+
+    def forward(self, input: Tensor):
+        output = super().forward(input)
+        return output * (self.embedding_dim**0.5)
+
+
 class Linear(nn.Module):
     def __init__(
         self,
         in_features: int,
         out_features: int,
         scale: bool = False,
-        zero_init: bool = False,
         gain: float = 0.5,
         device=None,
         dtype=None,
@@ -53,12 +72,8 @@ class Linear(nn.Module):
 
         if scale:
             self.scale = nn.Parameter(torch.ones(out_features, device=device, dtype=dtype))
-            if zero_init:
-                self.scale.data.zero_()
         else:
             self.register_parameter("scale", None)
-            if zero_init:
-                self.weight.data.zero_()
 
     def forward(self, x: Tensor):
         if self.scale is not None:
@@ -68,18 +83,3 @@ class Linear(nn.Module):
             weight = self.weight
 
         return x @ weight.type_as(x).t()
-
-
-class Embedding(nn.Embedding):
-    def __init__(self, num_embeddings: int, embedding_dim: int, gain=0.5, device=None, dtype=None):
-        super().__init__(
-            num_embeddings=num_embeddings,
-            embedding_dim=embedding_dim,
-            device=device,
-            dtype=dtype,
-        )
-        self.weight.data.mul_(gain / embedding_dim**0.5)
-
-    def forward(self, input: Tensor):
-        output = super().forward(input)
-        return output * (self.embedding_dim**0.5)

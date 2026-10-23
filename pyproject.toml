@@ -13,6 +13,9 @@ dependencies = [
     "tqdm",
 ]
 
+[project.optional-dependencies]
+wandb = ["wandb"]
+
 [tool.ruff]
 line-length = 100
 exclude = ["__pycache__"]

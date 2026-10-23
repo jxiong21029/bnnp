@@ -5,7 +5,17 @@ import os
 from collections.abc import Callable
 from typing import get_type_hints
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
+
+
+def _set_override(config, key, value, annotation):
+    if isinstance(config, BaseModel):
+        if config.model_config.get("frozen"):
+            setattr(config, key, value)  # Preserve Pydantic's frozen-instance error.
+        # Validate once with field/model validators, even without validate_assignment.
+        config.__pydantic_validator__.validate_assignment(config, key, value)
+    else:
+        setattr(config, key, TypeAdapter(annotation).validate_python(value))
 
 
 def parse_config(main: Callable):
@@ -35,24 +45,24 @@ def parse_config(main: Callable):
                 if not hasattr(cur, k):
                     raise AttributeError(f"{type(cur)} has no config option {k!r}")
                 cur = getattr(cur, k)
-            hints = get_type_hints(type(cur))
+            hints = get_type_hints(type(cur), include_extras=True)
             if final_key not in hints:
                 raise AttributeError(f"{type(cur)} has no config option {final_key!r}")
 
             if value_str.lower() == "none":
-                value_str = None
+                _set_override(cur, final_key, None, hints[final_key])
             else:
                 # Keep scalar/string overrides intact; decode JSON when the field cannot
                 # accept a string (e.g. a list, tuple, dict, or nested model).
                 try:
-                    TypeAdapter(hints[final_key]).validate_python(value_str)
-                except ValidationError:
+                    _set_override(cur, final_key, value_str, hints[final_key])
+                except ValidationError as exc:
                     try:
-                        value_str = json.loads(value_str)
+                        value = json.loads(value_str)
                     except json.JSONDecodeError:
-                        pass  # Let assignment validation report the invalid value.
+                        raise exc from None
+                    _set_override(cur, final_key, value, hints[final_key])
 
-            setattr(cur, final_key, value_str)
             casted_overrides.append(f"{key}={getattr(cur, final_key)}")
 
         if len(args.overrides) > 0 and int(os.environ.get("RANK", "0")) == 0:

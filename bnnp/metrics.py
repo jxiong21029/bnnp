@@ -1,3 +1,4 @@
+import importlib
 import logging
 import time
 from collections import defaultdict
@@ -5,28 +6,35 @@ from typing import Literal
 
 import torch
 
-try:
-    import wandb
-
-except ImportError:
-    wandb = None
-
 logger = logging.getLogger(__name__)
 CUDA_AVAILABLE = torch.cuda.is_available()
+LoggingBackend = Literal["logging", "wandb"]
+
+
+def _load_logging_module(backend: LoggingBackend):
+    if backend == "logging":
+        return None
+    try:
+        return importlib.import_module(backend)
+    except ImportError as exc:
+        raise ImportError(
+            f"{backend} logging requires its optional dependency; install 'bnnp[{backend}]'."
+        ) from exc
 
 
 class Metrics:
     def __init__(
         self,
         enabled: bool = True,
-        use_wandb: bool = False,
         use_cuda_events: bool = CUDA_AVAILABLE,
+        logging_backend: LoggingBackend = "logging",
     ):
-        if use_wandb:
-            assert wandb is not None, "wandb is not installed"
+        if logging_backend not in ("logging", "wandb"):
+            raise ValueError(f"Unknown logging backend: {logging_backend}")
         self.enabled = enabled
-        self.use_wandb = use_wandb
+        self.logging_backend = logging_backend
         self.use_cuda_events = use_cuda_events
+        self._logging_module = _load_logging_module(self.logging_backend) if enabled else None
 
         self.context = ""
         self.n = defaultdict(int)
@@ -131,7 +139,7 @@ class Metrics:
 
     @torch.compiler.disable
     def commit(self, _step: int | None = None, **metrics):
-        """Log metrics to wandb if use_wandb, otherwise to (standard library) logging."""
+        """Log aggregated metrics to the selected backend and clear accumulators."""
         if not self.enabled:
             return
         if metrics:
@@ -155,11 +163,13 @@ class Metrics:
             torch.cuda.synchronize(device)
         results = {k: float(v) for k, v in results.items()}
 
-        if self.use_wandb and wandb is not None:
+        if self.logging_backend != "logging" and self._logging_module is None:
+            self._logging_module = _load_logging_module(self.logging_backend)
+        if self.logging_backend == "wandb":
             if _step is not None:
-                wandb.log(results, step=_step, commit=True)
+                self._logging_module.log(results, step=_step, commit=True)  # type: ignore
             else:
-                wandb.log(results)
+                self._logging_module.log(results)  # type: ignore
         else:
             logger.info(", ".join(f"{k}: {v:.4g}" for k, v in results.items()))
 
