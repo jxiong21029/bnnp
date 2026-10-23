@@ -6,8 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "bnnp"
 version = "0.2.0"
 dependencies = [
+    "numpy",
+    "pydantic",
     "pytest",
     "torch",
+    "tqdm",
 ]
 
 [tool.ruff]

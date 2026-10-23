@@ -1,5 +1,5 @@
 from .configuration import parse_config
-from .metrics import Metrics, rms
+from .metrics import Metrics
 from .optim import DistMuon, DistNorMuon, Muon, NorMuon, setup_optimizer
 
 __all__ = [
@@ -9,6 +9,5 @@ __all__ = [
     "Muon",
     "NorMuon",
     "parse_config",
-    "rms",
     "setup_optimizer",
 ]
