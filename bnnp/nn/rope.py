@@ -6,13 +6,12 @@ from torch import Tensor
 class _RoPEBase(nn.Module):
     _freqs_name: str
 
-    def _apply(self, fn, recurse=True):
+    def _apply(self, fn, recurse=True):  # prevent downcasting frequencies
         freqs = getattr(self, self._freqs_name)
 
         def convert(tensor):
             converted = fn(tensor)
             if tensor is freqs and converted.dtype != torch.float32:
-                # Move the original values: casting converted back would retain rounding errors.
                 if tensor.is_meta:
                     return converted.float()
                 return tensor.to(device=converted.device, dtype=torch.float32)
@@ -87,6 +86,7 @@ class RoPENd(_RoPEBase):
         omega = min_freq * (max_freq / min_freq) ** torch.linspace(
             0, 1, round(self.n_freqs * (1 - p_zero_freqs)), device=device, dtype=torch.float32
         )
+        self.n_nonzero_freqs = len(omega)
         omega_F = torch.cat(
             (torch.zeros(self.n_freqs - len(omega), device=device, dtype=torch.float32), omega)
         )
@@ -123,8 +123,8 @@ class RoPENd(_RoPEBase):
     def precompute_rotations(
         self,
         size: tuple[int, int] | None = None,
+        base_size: tuple[int, int] | None = None,
         n_extra: int = 0,
-        base_hw: tuple[int, int] | None = None,
         positions: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """
@@ -146,14 +146,17 @@ class RoPENd(_RoPEBase):
             y_HW, x_HW = y_H1.expand(h, w), x_1W.expand(h, w)
             pos_NP = torch.stack([x_HW, y_HW], dim=-1).flatten(0, 1)
             pos_NP = torch.cat([pos_NP.new_zeros(n_extra, self.pos_dim), pos_NP], dim=0)
-            if base_hw is None:
+            if base_size is None:
                 freqs = self.freqs_hFP
             else:
-                # Smallest frequencies are left unchanged, largest are scaled propto sqrt(h * w)
-                base_h, base_w = base_hw
+                # Keep the smallest nonzero frequency fixed; scale the largest propto sqrt(h * w).
+                base_h, base_w = base_size
                 max_scale = (h * w / base_h / base_w) ** 0.5
                 scale_frac = torch.linspace(
-                    0, 1, self.freqs_hFP.shape[1], device=device, dtype=torch.float32
+                    0, 1, self.n_nonzero_freqs, device=device, dtype=torch.float32
+                )
+                scale_frac = torch.cat(
+                    [scale_frac.new_zeros(self.n_freqs - self.n_nonzero_freqs), scale_frac]
                 )
                 freqs = self.freqs_hFP * (max_scale ** scale_frac[:, None])
         else:
