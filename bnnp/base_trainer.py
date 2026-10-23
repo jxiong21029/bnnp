@@ -138,12 +138,21 @@ class BaseTrainer:
             self.run_dir.mkdir(exist_ok=True)
 
         if self.is_main_process:
-            commit_hash = subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"], text=True
-            ).strip()
-            diff = subprocess.check_output(["git", "diff", "HEAD"], text=True).strip()
-            hostname = subprocess.check_output(["hostname"], text=True).strip()
-            nvidia_smi = subprocess.check_output(["nvidia-smi"], text=True).strip()
+
+            def _diagnostic_output(command: list[str]) -> str | None:
+                """Collect optional diagnostics without aborting training if a command fails."""
+                try:
+                    return subprocess.check_output(
+                        command, text=True, stderr=subprocess.STDOUT
+                    ).strip()
+                except (OSError, subprocess.CalledProcessError) as exc:
+                    logger.warning(f"Could not collect diagnostic {' '.join(command)!r}: {exc}")
+                    return None
+
+            commit_hash = _diagnostic_output(["git", "rev-parse", "--short", "HEAD"])
+            diff = _diagnostic_output(["git", "diff", "HEAD"])
+            hostname = _diagnostic_output(["hostname"])
+            nvidia_smi = _diagnostic_output(["nvidia-smi"])
             logger.info(f"git commit hash: {commit_hash}")
             logger.info(f"git diff:\n{diff}")
             logger.info(f"running on host: {hostname}")
@@ -184,7 +193,6 @@ class BaseTrainer:
             logger.info(f"profiler enabled. Writing traces to {profile_dir}")
 
         self.step = 0
-        self.epoch = 0
         self.metrics.context = "train_"
 
     def next_seed(self) -> int:
@@ -196,7 +204,8 @@ class BaseTrainer:
             ((self.step + 1) in self.config.early_valid_steps)
             or (self.step + 1 == self.config.n_steps)
             or (
-                (
+                self.config.valid_interval > 0
+                and (
                     len(self.config.early_valid_steps) == 0
                     or (self.step + 1) > max(self.config.early_valid_steps)
                 )
@@ -205,26 +214,29 @@ class BaseTrainer:
         )
 
     def run(self):
-        pbar = tqdm.tqdm(
-            total=self.config.n_steps,
-            desc="train",
-            disable=(not self.is_main_process) or (not self.config.use_wandb),
-            **self.config.tqdm_kwargs,
-        )
-        if self.step > 0:
-            pbar.update(self.step)
-        while self.step < self.config.n_steps:
-            self.train_step()
+        try:
+            with tqdm.tqdm(
+                total=self.config.n_steps,
+                desc="train",
+                disable=(not self.is_main_process) or (not self.config.use_wandb),
+                **self.config.tqdm_kwargs,
+            ) as pbar:
+                if self.step > 0:
+                    pbar.update(self.step)
+                while self.step < self.config.n_steps:
+                    self.train_step()
 
-            if self.should_run_validation():
-                self.valid_epoch()
-            self.metrics.commit(_step=self.step + 1)
+                    if self.should_run_validation():
+                        self.valid_epoch()
+                    self.metrics.commit(_step=self.step + 1)
 
-            self.step += 1
-            pbar.update(1)
+                    self.step += 1
+                    pbar.update(1)
+                    if self.profiler is not None:
+                        self.profiler.step()
+        finally:
             if self.profiler is not None:
-                self.profiler.step()
-        pbar.close()
+                self.profiler.stop()
 
     def train_step(self):
         pass
@@ -236,9 +248,10 @@ class BaseTrainer:
     def gather_dict(self, data: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         if not self.is_distributed:
             return data
+
         ret = {}
-        for k, v in data.items():
-            global_v = v.detach().clone().float()
+        for k in sorted(data):
+            global_v = data[k].detach().clone().float()
             dist.all_reduce(global_v, op=dist.ReduceOp.SUM)
             global_v /= self.world_size
             ret[k] = global_v
