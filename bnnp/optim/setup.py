@@ -9,8 +9,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.nn import Parameter
 
 from .distributed import DistMuon, DistNorMuon
-from .muon import Muon
-from .normuon import NorMuon
+from .muon import Muon, NorMuon
 
 _DEFAULT_LOGGER = logging.getLogger(__name__)
 

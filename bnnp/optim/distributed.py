@@ -7,9 +7,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 
-from .base import normalize_update, orthogonalize
-from .muon import Muon
-from .normuon import NorMuon
+from .muon import Muon, NorMuon, normalize_update, orthogonalize
 
 
 def _from_local(local, shape, mesh, placements):
