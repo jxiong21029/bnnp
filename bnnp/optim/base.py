@@ -5,16 +5,18 @@ from torch import Tensor
 from torch.optim.adam import adam
 
 # Newton-schulz coefficients from Polar Express (https://arxiv.org/abs/2505.16932) with
-# safety factor built-in
+# safety factor of 0.02 built-in
 COEFFS = [
-    (8.205160, -22.901935, 16.460725),
-    (4.066395, -2.861154, 0.518400),
-    (3.909595, -2.823352, 0.525037),
-    (3.285564, -2.415302, 0.485294),
-    (2.277873, -1.619822, 0.398481),
-    (1.872576, -1.230704, 0.358516),
-    (1.856437, -1.213239, 0.356800),
-    (1.856436, -1.213238, 0.356800),
+    (8.1565545, -22.4832929, 15.8787699),
+    (4.0429299, -2.8089175, 0.5000178),
+    (3.8916678, -2.7724842, 0.5060648),
+    (3.2857537, -2.3681295, 0.4644902),
+    (2.3005307, -1.6111666, 0.3833374),
+    (1.8631211, -1.2042161, 0.3421880),
+    (1.8382572, -1.1779263, 0.3396513),
+    (1.8382353, -1.1779029, 0.3396491),
+    (1.8382352, -1.1779028, 0.3396490),
+    (1.8750000, -1.2500001, 0.3750000),
 ]
 
 
@@ -22,18 +24,22 @@ COEFFS = [
 def orthogonalize(G: Tensor, steps: int, eps: float) -> Tensor:
     """Computes the semi-orthogonalization of G via Newton-Schulz iteration."""
     assert G.ndim >= 2, "Newton-Schulz expects at least 2D tensor"
-    X = G.bfloat16()
-    transposed = G.size(-2) > G.size(-1)
-    if transposed:
+    X = G.float()
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
+    X = X.float16()
+
+    tall = X.size(-2) > X.size(-1)
+    if tall:
         X = X.mT
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + eps)
+
     for i in range(steps):
         a, b, c = COEFFS[min(i, len(COEFFS) - 1)]
         A = X @ X.mT
         X = a * X + (b * A + c * A @ A) @ X
-    if transposed:
+
+    if tall:
         X = X.mT
+
     return X.type_as(G)
 
 
