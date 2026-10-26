@@ -27,7 +27,7 @@ def orthogonalize(G: Tensor, steps: int, eps: float) -> Tensor:
     assert G.ndim >= 2, "Newton-Schulz expects at least 2D tensor"
     X = G.float()
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
-    X = X.float16()
+    X = X.to(torch.float16)
 
     tall = X.size(-2) > X.size(-1)
     if tall:
