@@ -30,7 +30,9 @@ class RMSNorm(nn.Module):
     def forward(self, x: Tensor):
         assert x.size(-1) == self.dim, f"expected x.size(-1) == {self.dim} but got {x.size(-1)=}"
         return F.rms_norm(
-            x.float(), (x.size(-1),), weight=None if self.weight is None else (self.weight + 1)
+            x.float(),
+            (x.size(-1),),
+            weight=None if self.weight is None else (self.weight + 1).float(),
         ).type_as(x)
 
 
