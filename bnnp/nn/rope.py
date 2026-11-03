@@ -1,3 +1,5 @@
+from typing import Literal
+
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -126,11 +128,18 @@ class RoPENd(_RoPEBase):
         base_size: tuple[int, int] | None = None,
         n_extra: int = 0,
         positions: Tensor | None = None,
+        freq_scaling: Literal["ramp", "uniform"] = "ramp",
     ) -> tuple[Tensor, Tensor]:
         """
         Precompute cos/sin tables for either the provided positions or for a 2d input of
         a given size, plus an optional prefix of n_extra tokens treated as if they were
         located at (0, 0).
+
+        If base_size is given, frequencies are rescaled for the new size according to
+        freq_scaling, where scale = sqrt(h * w / (base_h * base_w)):
+          - "ramp": keep the smallest nonzero frequency fixed and multiply the largest by
+            scale, interpolating geometrically in between.
+          - "uniform": multiply all frequencies by scale.
         """
         device = self.freqs_hFP.device
 
@@ -148,7 +157,10 @@ class RoPENd(_RoPEBase):
             pos_NP = torch.cat([pos_NP.new_zeros(n_extra, self.pos_dim), pos_NP], dim=0)
             if base_size is None:
                 freqs = self.freqs_hFP
-            else:
+            elif freq_scaling == "uniform":
+                base_h, base_w = base_size
+                freqs = self.freqs_hFP * (h * w / base_h / base_w) ** 0.5
+            elif freq_scaling == "ramp":
                 # Keep the smallest nonzero frequency fixed; scale the largest propto sqrt(h * w).
                 base_h, base_w = base_size
                 max_scale = (h * w / base_h / base_w) ** 0.5
@@ -159,6 +171,8 @@ class RoPENd(_RoPEBase):
                     [scale_frac.new_zeros(self.n_freqs - self.n_nonzero_freqs), scale_frac]
                 )
                 freqs = self.freqs_hFP * (max_scale ** scale_frac[:, None])
+            else:
+                raise ValueError(f"Unknown freq_scaling: {freq_scaling!r}")
         else:
             if size is not None:
                 raise ValueError("Must specify exactly one of size and positions")
