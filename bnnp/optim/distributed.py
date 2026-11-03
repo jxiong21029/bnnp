@@ -88,14 +88,15 @@ class _DistributedMuon:
         # momentum, adaptive state, and parameter updates stay identical on every rank.
         owned = gg[self._rank :: self._world_size]
         count = (len(params) + self._world_size - 1) // self._world_size
-        output = gg.new_zeros((count, *gg.shape[1:]))
+        # orthogonalize computes in fp16, so gathering its output in fp16 is lossless.
+        output = gg.new_zeros((count, *gg.shape[1:]), dtype=torch.float16)
         if len(owned):
             output[: len(owned)] = orthogonalize(owned, steps=group["ns_steps"], eps=group["eps"])
         outputs = [torch.empty_like(output) for _ in range(self._world_size)]
         dist.all_gather(outputs, output, group=self._process_group)
         gg = torch.stack(
             [outputs[i % self._world_size][i // self._world_size] for i in range(len(params))]
-        )
+        ).type_as(gg)
         return self._normalize_update(group, params, states, gg)  # type: ignore
 
     def _dtensor_update(self, group, params, states, gg):
@@ -140,8 +141,10 @@ class _DistributedMuon:
                 list(local_variance.unbind(0)),
             )
 
-        update = _from_local(owned, batch.shape, mesh, owners)
-        return update.redistribute(placements=placements).to_local()
+        # orthogonalize computes in fp16, so returning Muon updates in fp16 is lossless.
+        # NorMuon normalizes before this point, so its updates are rounded to fp16.
+        update = _from_local(owned.to(torch.float16), batch.shape, mesh, owners)
+        return update.redistribute(placements=placements).to_local().type_as(gg)
 
 
 class DistMuon(_DistributedMuon, Muon):
